@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>org.swisseph</groupId>
+    <artifactId>swisseph-java-ffm</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>Swiss Ephemeris Java FFM</name>
+    <description>Java bindings for Swiss Ephemeris using the Foreign Function and Memory API.</description>
+    <url>https://github.com/honsali/swisseph-java-ffm</url>
+
+    <licenses>
+        <license>
+            <name>GNU Affero General Public License v3.0</name>
+            <url>https://www.gnu.org/licenses/agpl-3.0.html</url>
+            <distribution>repo</distribution>
+        </license>
+    </licenses>
+
+    <scm>
+        <connection>scm:git:https://github.com/honsali/swisseph-java-ffm.git</connection>
+        <developerConnection>scm:git:ssh://git@github.com/honsali/swisseph-java-ffm.git</developerConnection>
+        <url>https://github.com/honsali/swisseph-java-ffm</url>
+    </scm>
+
+    <distributionManagement>
+        <repository>
+            <id>github</id>
+            <name>GitHub Packages</name>
+            <url>https://maven.pkg.github.com/honsali/swisseph-java-ffm</url>
+        </repository>
+    </distributionManagement>
+
+    <properties>
+        <maven.compiler.release>25</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+        <junit.version>6.0.3</junit.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+                <configuration>
+                    <release>${maven.compiler.release}</release>
+                </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.5</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>

@@ -1,0 +1,15 @@
+/target/
+/.m2-cache/
+/.integration-temp/
+
+### IntelliJ IDEA ###
+.idea/
+*.iml
+
+### Eclipse ###
+.classpath
+.project
+.settings/
+
+### Visual Studio Code ###
+.vscode/
