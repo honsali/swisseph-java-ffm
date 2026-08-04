@@ -11,6 +11,10 @@ The first binding layer covers:
 - native-library loading and `swe_version()`;
 - `swe_julday()`, `swe_revjul()`, and `swe_utc_to_jd()`;
 - `swe_calc()` and `swe_calc_ut()`;
+- `swe_deltat()`, `swe_houses_ex()`, and `swe_azalt()`;
+- `swe_fixstar_ut()` and `swe_rise_trans()`;
+- global and local solar-eclipse searches and circumstances;
+- global and local lunar-eclipse searches and circumstances;
 - `swe_get_planet_name()`;
 - `swe_set_ephe_path()`, `swe_set_jpl_file()`, `swe_set_topo()`, and `swe_set_sid_mode()`.
 
@@ -33,7 +37,9 @@ Swiss Ephemeris is stateful. This library serializes native calls, but path, top
 import org.swisseph.ffm.CalculationFlag;
 import org.swisseph.ffm.CalendarType;
 import org.swisseph.ffm.CelestialBody;
+import org.swisseph.ffm.EclipseResult;
 import org.swisseph.ffm.EphemerisPosition;
+import org.swisseph.ffm.GeographicPosition;
 import org.swisseph.ffm.SwissEph;
 
 try (SwissEph swe = SwissEph.loadConfigured()) {
@@ -48,8 +54,20 @@ try (SwissEph swe = SwissEph.loadConfigured()) {
 
     System.out.println(swe.version());
     System.out.println(sun.longitude());
+
+    GeographicPosition casablanca = new GeographicPosition(-7.5898, 33.5731, 20.0);
+    EclipseResult eclipse = swe.solarEclipseWhenLocal(
+            jd,
+            CalculationFlag.MOSHIER_EPHEMERIS.value(),
+            casablanca,
+            false);
+    System.out.println(eclipse.time(0));
 }
 ```
+
+Native bit masks that are not simple calculation flags are exposed through
+`EclipseFlag.mask(...)` and `RiseTransitFlag.mask(...)`. Eclipse result arrays
+retain the index layout documented by Swiss Ephemeris 2.10.03.
 
 Pass the native-library path and enable native access:
 
@@ -79,10 +97,13 @@ Unit tests do not require a native library. Run the native integration test with
 
 ```shell
 mvn -Dswisseph.integration.library=/absolute/path/to/libswe.so \
+  -Dswisseph.integration.ephemeris=/absolute/path/to/ephe \
   -DargLine=--enable-native-access=ALL-UNNAMED test
 ```
 
 Without `swisseph.integration.library`, the native integration test is skipped.
+The optional `swisseph.integration.ephemeris` property enables the fixed-star
+test and must point to a directory containing `sefstars.txt`.
 
 ## Publishing to GitHub Packages
 

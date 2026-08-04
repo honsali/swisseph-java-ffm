@@ -1,6 +1,8 @@
 /target/
 /.m2-cache/
 /.integration-temp/
+/dll/
+/ephe/
 
 ### IntelliJ IDEA ###
 .idea/
