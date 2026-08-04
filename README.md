@@ -110,11 +110,11 @@ test and must point to a directory containing `sefstars.txt`.
 The Maven coordinates are:
 
 ```text
-org.swisseph:swisseph-java-ffm:0.1.0
+org.swisseph:swisseph-java-ffm:0.2.0
 ```
 
 Publishing is configured for the repository's GitHub Packages registry. Create
-and publish a GitHub release with the tag `v0.1.0`, or run the **Publish Maven
+and publish a GitHub release with the tag `v0.2.0`, or run the **Publish Maven
 package** workflow manually. The workflow builds with JDK 25 and authenticates
 with its repository-scoped `GITHUB_TOKEN`; no personal token is stored in this
 repository.
