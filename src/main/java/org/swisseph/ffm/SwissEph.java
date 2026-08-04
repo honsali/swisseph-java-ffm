@@ -5,6 +5,7 @@ import org.swisseph.ffm.internal.NativeBindings;
 import java.lang.foreign.Arena;
 import java.lang.foreign.MemorySegment;
 import java.lang.foreign.SymbolLookup;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
@@ -27,7 +28,12 @@ public final class SwissEph implements AutoCloseable {
     public static final String LIBRARY_PATH_ENVIRONMENT = "SWISSEPH_LIBRARY";
 
     private static final int TEXT_BUFFER_SIZE = 256;
+    private static final int STAR_BUFFER_SIZE = 512;
     private static final int POSITION_VALUE_COUNT = 6;
+    private static final int HOUSE_ADDITIONAL_POINT_COUNT = 10;
+    private static final int ECLIPSE_TIME_COUNT = 10;
+    private static final int ECLIPSE_ATTRIBUTE_COUNT = 20;
+    private static final int ECLIPSE_GEOGRAPHIC_POSITION_COUNT = 10;
     private static final ReentrantLock NATIVE_LOCK = new ReentrantLock();
 
     private final Arena libraryArena;
@@ -210,6 +216,304 @@ public final class SwissEph implements AutoCloseable {
         });
     }
 
+    /** Returns ET - UT in days using {@code swe_deltat()}. */
+    public double deltaT(double julianDayUt) {
+        ensureOpen();
+        return locked(() -> nativeBindings.deltaT(julianDayUt));
+    }
+
+    /**
+     * Calculates house cusps with {@code swe_houses_ex()}.
+     * The supported flags are {@link CalculationFlag#SIDEREAL},
+     * {@link CalculationFlag#RADIANS}, and {@link CalculationFlag#NO_NUTATION}.
+     */
+    public HouseCusps housesEx(double julianDayUt, double latitude, double longitude,
+                               HouseSystem houseSystem, CalculationFlag... flags) {
+        return housesEx(
+                julianDayUt,
+                CalculationFlag.mask(flags),
+                latitude,
+                longitude,
+                Objects.requireNonNull(houseSystem, "houseSystem"));
+    }
+
+    /** Variant accepting an already combined native {@code iflag} mask. */
+    public HouseCusps housesEx(double julianDayUt, int flags, double latitude, double longitude,
+                               HouseSystem houseSystem) {
+        Objects.requireNonNull(houseSystem, "houseSystem");
+        validateGeographicCoordinates(longitude, latitude);
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                int cuspCount = houseSystem.houseCount() + 1;
+                MemorySegment cusps = arena.allocate(JAVA_DOUBLE, cuspCount);
+                MemorySegment additionalPoints = arena.allocate(
+                        JAVA_DOUBLE, HOUSE_ADDITIONAL_POINT_COUNT);
+                int code = nativeBindings.housesEx(
+                        julianDayUt, flags, latitude, longitude, houseSystem.code(),
+                        cusps, additionalPoints);
+                if (code < 0) {
+                    throw new SwissEphException("swe_houses_ex", code, "house calculation failed");
+                }
+                return new HouseCusps(
+                        readDoubles(cusps, cuspCount),
+                        readDoubles(additionalPoints, HOUSE_ADDITIONAL_POINT_COUNT));
+            }
+        });
+    }
+
+    /**
+     * Converts ecliptic or equatorial coordinates to azimuth and altitude with
+     * {@code swe_azalt()}.
+     */
+    public HorizontalCoordinates azimuthAltitude(
+            double julianDayUt,
+            HorizontalCoordinateType coordinateType,
+            GeographicPosition observer,
+            double atmosphericPressure,
+            double atmosphericTemperature,
+            double firstCoordinate,
+            double secondCoordinate,
+            double distance) {
+        Objects.requireNonNull(coordinateType, "coordinateType");
+        Objects.requireNonNull(observer, "observer");
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment geographicPosition = allocateGeographicPosition(arena, observer);
+                MemorySegment input = arena.allocate(JAVA_DOUBLE, 3);
+                input.setAtIndex(JAVA_DOUBLE, 0, firstCoordinate);
+                input.setAtIndex(JAVA_DOUBLE, 1, secondCoordinate);
+                input.setAtIndex(JAVA_DOUBLE, 2, distance);
+                MemorySegment result = arena.allocate(JAVA_DOUBLE, 3);
+                nativeBindings.azalt(
+                        julianDayUt,
+                        coordinateType.nativeValue(),
+                        geographicPosition,
+                        atmosphericPressure,
+                        atmosphericTemperature,
+                        input,
+                        result);
+                return new HorizontalCoordinates(
+                        result.getAtIndex(JAVA_DOUBLE, 0),
+                        result.getAtIndex(JAVA_DOUBLE, 1),
+                        result.getAtIndex(JAVA_DOUBLE, 2));
+            }
+        });
+    }
+
+    /** Calculates a fixed-star position in universal time with {@code swe_fixstar_ut()}. */
+    public FixedStarPosition fixedStarUt(double julianDayUt, String starName,
+                                         CalculationFlag... flags) {
+        return fixedStarUt(julianDayUt, starName, CalculationFlag.mask(flags));
+    }
+
+    /** Variant accepting an already combined native {@code iflag} mask. */
+    public FixedStarPosition fixedStarUt(double julianDayUt, String starName, int flags) {
+        validateStarName(starName);
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment star = allocateStarName(arena, starName);
+                MemorySegment values = arena.allocate(JAVA_DOUBLE, POSITION_VALUE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int returnedFlags = nativeBindings.fixedStarUt(
+                        star, julianDayUt, flags, values, error);
+                String message = error.getString(0);
+                if (returnedFlags < 0) {
+                    throw new SwissEphException("swe_fixstar_ut", returnedFlags, message);
+                }
+                return new FixedStarPosition(
+                        star.getString(0),
+                        ephemerisPosition(values, returnedFlags, message));
+            }
+        });
+    }
+
+    /** Searches for a rise, set, or transit event for a standard body. */
+    public RiseTransitResult riseTransit(
+            double startJulianDayUt,
+            CelestialBody body,
+            GeographicPosition observer,
+            double atmosphericPressure,
+            double atmosphericTemperature,
+            RiseTransitFlag... eventFlags) {
+        Objects.requireNonNull(body, "body");
+        return riseTransit(
+                startJulianDayUt,
+                body.id(),
+                0,
+                RiseTransitFlag.mask(eventFlags),
+                observer,
+                atmosphericPressure,
+                atmosphericTemperature);
+    }
+
+    /** Searches for a rise, set, or transit event for any native body ID. */
+    public RiseTransitResult riseTransit(
+            double startJulianDayUt,
+            int bodyId,
+            int ephemerisFlags,
+            int eventFlags,
+            GeographicPosition observer,
+            double atmosphericPressure,
+            double atmosphericTemperature) {
+        return riseTransit(
+                startJulianDayUt, bodyId, null, ephemerisFlags, eventFlags, observer,
+                atmosphericPressure, atmosphericTemperature);
+    }
+
+    /** Searches for a rise, set, or transit event for a fixed star. */
+    public RiseTransitResult riseTransit(
+            double startJulianDayUt,
+            String starName,
+            int ephemerisFlags,
+            int eventFlags,
+            GeographicPosition observer,
+            double atmosphericPressure,
+            double atmosphericTemperature) {
+        validateStarName(starName);
+        return riseTransit(
+                startJulianDayUt, 0, starName, ephemerisFlags, eventFlags, observer,
+                atmosphericPressure, atmosphericTemperature);
+    }
+
+    /** Finds the next or previous global solar eclipse. */
+    public EclipseResult solarEclipseWhenGlobal(
+            double startJulianDayUt, int ephemerisFlags, int eclipseTypeFlags, boolean backward) {
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.solarEclipseWhenGlobal(
+                        startJulianDayUt, ephemerisFlags, eclipseTypeFlags, times,
+                        backward ? 1 : 0, error);
+                return eclipseResult("swe_sol_eclipse_when_glob", flags, error,
+                        readDoubles(times, ECLIPSE_TIME_COUNT), new double[0], new double[0]);
+            }
+        });
+    }
+
+    /** Finds the next or previous solar eclipse visible from an observer position. */
+    public EclipseResult solarEclipseWhenLocal(
+            double startJulianDayUt,
+            int ephemerisFlags,
+            GeographicPosition observer,
+            boolean backward) {
+        Objects.requireNonNull(observer, "observer");
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment geographicPosition = allocateGeographicPosition(arena, observer);
+                MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
+                MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.solarEclipseWhenLocal(
+                        startJulianDayUt, ephemerisFlags, geographicPosition, times, attributes,
+                        backward ? 1 : 0, error);
+                return eclipseResult("swe_sol_eclipse_when_loc", flags, error,
+                        readDoubles(times, ECLIPSE_TIME_COUNT),
+                        readDoubles(attributes, ECLIPSE_ATTRIBUTE_COUNT), new double[0]);
+            }
+        });
+    }
+
+    /** Finds the central or maximum geographic location of a solar eclipse at a time. */
+    public EclipseResult solarEclipseWhere(double julianDayUt, int ephemerisFlags) {
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment geographicPositions = arena.allocate(
+                        JAVA_DOUBLE, ECLIPSE_GEOGRAPHIC_POSITION_COUNT);
+                MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.solarEclipseWhere(
+                        julianDayUt, ephemerisFlags, geographicPositions, attributes, error);
+                return eclipseResult("swe_sol_eclipse_where", flags, error, new double[0],
+                        readDoubles(attributes, ECLIPSE_ATTRIBUTE_COUNT),
+                        readDoubles(geographicPositions, ECLIPSE_GEOGRAPHIC_POSITION_COUNT));
+            }
+        });
+    }
+
+    /** Computes solar-eclipse attributes for a time and observer position. */
+    public EclipseResult solarEclipseHow(
+            double julianDayUt, int ephemerisFlags, GeographicPosition observer) {
+        Objects.requireNonNull(observer, "observer");
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment geographicPosition = allocateGeographicPosition(arena, observer);
+                MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.solarEclipseHow(
+                        julianDayUt, ephemerisFlags, geographicPosition, attributes, error);
+                return eclipseResult("swe_sol_eclipse_how", flags, error, new double[0],
+                        readDoubles(attributes, ECLIPSE_ATTRIBUTE_COUNT), new double[0]);
+            }
+        });
+    }
+
+    /** Finds the next or previous lunar eclipse globally. */
+    public EclipseResult lunarEclipseWhen(
+            double startJulianDayUt, int ephemerisFlags, int eclipseTypeFlags, boolean backward) {
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.lunarEclipseWhen(
+                        startJulianDayUt, ephemerisFlags, eclipseTypeFlags, times,
+                        backward ? 1 : 0, error);
+                return eclipseResult("swe_lun_eclipse_when", flags, error,
+                        readDoubles(times, ECLIPSE_TIME_COUNT), new double[0], new double[0]);
+            }
+        });
+    }
+
+    /** Finds the next or previous lunar eclipse visible from an observer position. */
+    public EclipseResult lunarEclipseWhenLocal(
+            double startJulianDayUt,
+            int ephemerisFlags,
+            GeographicPosition observer,
+            boolean backward) {
+        Objects.requireNonNull(observer, "observer");
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment geographicPosition = allocateGeographicPosition(arena, observer);
+                MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
+                MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.lunarEclipseWhenLocal(
+                        startJulianDayUt, ephemerisFlags, geographicPosition, times, attributes,
+                        backward ? 1 : 0, error);
+                return eclipseResult("swe_lun_eclipse_when_loc", flags, error,
+                        readDoubles(times, ECLIPSE_TIME_COUNT),
+                        readDoubles(attributes, ECLIPSE_ATTRIBUTE_COUNT), new double[0]);
+            }
+        });
+    }
+
+    /** Computes lunar-eclipse attributes for a time and observer position. */
+    public EclipseResult lunarEclipseHow(
+            double julianDayUt, int ephemerisFlags, GeographicPosition observer) {
+        Objects.requireNonNull(observer, "observer");
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment geographicPosition = allocateGeographicPosition(arena, observer);
+                MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int flags = nativeBindings.lunarEclipseHow(
+                        julianDayUt, ephemerisFlags, geographicPosition, attributes, error);
+                return eclipseResult("swe_lun_eclipse_how", flags, error, new double[0],
+                        readDoubles(attributes, ECLIPSE_ATTRIBUTE_COUNT), new double[0]);
+            }
+        });
+    }
+
     /** Calculates a body position for a Julian day in universal time. */
     public EphemerisPosition calculateUt(double julianDayUt, CelestialBody body,
                                          CalculationFlag... flags) {
@@ -246,17 +550,115 @@ public final class SwissEph implements AutoCloseable {
                     throw new SwissEphException(
                             universalTime ? "swe_calc_ut" : "swe_calc", returnedFlags, message);
                 }
-                return new EphemerisPosition(
-                        values.getAtIndex(JAVA_DOUBLE, 0),
-                        values.getAtIndex(JAVA_DOUBLE, 1),
-                        values.getAtIndex(JAVA_DOUBLE, 2),
-                        values.getAtIndex(JAVA_DOUBLE, 3),
-                        values.getAtIndex(JAVA_DOUBLE, 4),
-                        values.getAtIndex(JAVA_DOUBLE, 5),
-                        returnedFlags,
-                        message);
+                return ephemerisPosition(values, returnedFlags, message);
             }
         });
+    }
+
+    private RiseTransitResult riseTransit(
+            double startJulianDayUt,
+            int bodyId,
+            String starName,
+            int ephemerisFlags,
+            int eventFlags,
+            GeographicPosition observer,
+            double atmosphericPressure,
+            double atmosphericTemperature) {
+        Objects.requireNonNull(observer, "observer");
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment star = starName == null
+                        ? MemorySegment.NULL
+                        : allocateStarName(arena, starName);
+                MemorySegment geographicPosition = allocateGeographicPosition(arena, observer);
+                MemorySegment result = arena.allocate(JAVA_DOUBLE);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int code = nativeBindings.riseTransit(
+                        startJulianDayUt, bodyId, star, ephemerisFlags, eventFlags,
+                        geographicPosition, atmosphericPressure, atmosphericTemperature,
+                        result, error);
+                String message = error.getString(0);
+                if (code == -2) {
+                    return new RiseTransitResult(false, Double.NaN, message);
+                }
+                if (code < 0) {
+                    throw new SwissEphException("swe_rise_trans", code, message);
+                }
+                return new RiseTransitResult(true, result.get(JAVA_DOUBLE, 0), message);
+            }
+        });
+    }
+
+    private static EphemerisPosition ephemerisPosition(
+            MemorySegment values, int returnedFlags, String message) {
+        return new EphemerisPosition(
+                values.getAtIndex(JAVA_DOUBLE, 0),
+                values.getAtIndex(JAVA_DOUBLE, 1),
+                values.getAtIndex(JAVA_DOUBLE, 2),
+                values.getAtIndex(JAVA_DOUBLE, 3),
+                values.getAtIndex(JAVA_DOUBLE, 4),
+                values.getAtIndex(JAVA_DOUBLE, 5),
+                returnedFlags,
+                message);
+    }
+
+    private static EclipseResult eclipseResult(
+            String function,
+            int flags,
+            MemorySegment error,
+            double[] times,
+            double[] attributes,
+            double[] geographicPositions) {
+        String message = error.getString(0);
+        if (flags < 0) {
+            throw new SwissEphException(function, flags, message);
+        }
+        return new EclipseResult(flags, times, attributes, geographicPositions, message);
+    }
+
+    private static MemorySegment allocateGeographicPosition(
+            Arena arena, GeographicPosition geographicPosition) {
+        MemorySegment result = arena.allocate(JAVA_DOUBLE, 3);
+        result.setAtIndex(JAVA_DOUBLE, 0, geographicPosition.longitude());
+        result.setAtIndex(JAVA_DOUBLE, 1, geographicPosition.latitude());
+        result.setAtIndex(JAVA_DOUBLE, 2, geographicPosition.altitudeMeters());
+        return result;
+    }
+
+    private static MemorySegment allocateStarName(Arena arena, String starName) {
+        MemorySegment result = arena.allocate(STAR_BUFFER_SIZE);
+        result.setString(0, starName);
+        return result;
+    }
+
+    private static void validateStarName(String starName) {
+        Objects.requireNonNull(starName, "starName");
+        if (starName.isBlank()) {
+            throw new IllegalArgumentException("starName must not be blank");
+        }
+        if (starName.getBytes(StandardCharsets.UTF_8).length >= STAR_BUFFER_SIZE) {
+            throw new IllegalArgumentException("starName is too long");
+        }
+    }
+
+    private static void validateGeographicCoordinates(double longitude, double latitude) {
+        if (!Double.isFinite(longitude) || longitude < -180.0 || longitude > 180.0) {
+            throw new IllegalArgumentException(
+                    "longitude must be finite and between -180 and 180 degrees");
+        }
+        if (!Double.isFinite(latitude) || latitude < -90.0 || latitude > 90.0) {
+            throw new IllegalArgumentException(
+                    "latitude must be finite and between -90 and 90 degrees");
+        }
+    }
+
+    private static double[] readDoubles(MemorySegment segment, int count) {
+        double[] result = new double[count];
+        for (int index = 0; index < count; index++) {
+            result[index] = segment.getAtIndex(JAVA_DOUBLE, index);
+        }
+        return result;
     }
 
     /** Calls {@code swe_close()} and unloads this native-library lookup. */
