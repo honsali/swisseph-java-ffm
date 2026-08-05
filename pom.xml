@@ -6,7 +6,7 @@
 
     <groupId>org.swisseph</groupId>
     <artifactId>swisseph-java-ffm</artifactId>
-    <version>0.2.0</version>
+    <version>0.3.0</version>
     <packaging>jar</packaging>
 
     <name>Swiss Ephemeris Java FFM</name>

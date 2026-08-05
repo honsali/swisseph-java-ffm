@@ -41,6 +41,14 @@ class SwissEphIntegrationTest {
             assertTrue((sun.returnedFlags() & CalculationFlag.MOSHIER_EPHEMERIS.value()) != 0);
             assertTrue((sun.returnedFlags() & CalculationFlag.SPEED.value()) != 0);
 
+            PlanetaryPhenomena moonPhenomena = swe.phenomenaUt(
+                    j2000, CelestialBody.MOON, CalculationFlag.MOSHIER_EPHEMERIS);
+            assertTrue(moonPhenomena.phaseAngle() >= 0.0);
+            assertTrue(moonPhenomena.illuminatedFraction() >= 0.0
+                    && moonPhenomena.illuminatedFraction() <= 1.0);
+            assertTrue(moonPhenomena.apparentDiameter() > 0.0);
+            assertTrue(Double.isFinite(moonPhenomena.apparentMagnitude()));
+
             if (ephemerisPath != null && !ephemerisPath.isBlank()) {
                 FixedStarPosition sirius = swe.fixedStarUt(
                         j2000, "Sirius", CalculationFlag.MOSHIER_EPHEMERIS);

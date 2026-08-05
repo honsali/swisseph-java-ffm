@@ -72,4 +72,28 @@ class ExtendedApiValueTest {
         assertArrayEquals(new double[0], result.geographicPositions());
         assertEquals("", result.warning());
     }
+
+    @Test
+    void planetaryPhenomenaProtectAttributesAndExposeNamedValues() {
+        double[] attributes = new double[20];
+        attributes[0] = 30.0;
+        attributes[1] = 0.75;
+        attributes[2] = 45.0;
+        attributes[3] = 0.5;
+        attributes[4] = -12.3;
+
+        PlanetaryPhenomena result = new PlanetaryPhenomena(attributes, null);
+        attributes[0] = 0.0;
+
+        assertEquals(30.0, result.phaseAngle());
+        assertEquals(0.75, result.illuminatedFraction());
+        assertEquals(45.0, result.elongation());
+        assertEquals(0.5, result.apparentDiameter());
+        assertEquals(-12.3, result.apparentMagnitude());
+        assertEquals("", result.warning());
+
+        double[] returned = result.attributes();
+        returned[0] = 0.0;
+        assertEquals(30.0, result.phaseAngle());
+    }
 }

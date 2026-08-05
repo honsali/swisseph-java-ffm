@@ -34,6 +34,7 @@ public final class SwissEph implements AutoCloseable {
     private static final int ECLIPSE_TIME_COUNT = 10;
     private static final int ECLIPSE_ATTRIBUTE_COUNT = 20;
     private static final int ECLIPSE_GEOGRAPHIC_POSITION_COUNT = 10;
+    private static final int PHENOMENA_ATTRIBUTE_COUNT = 20;
     private static final ReentrantLock NATIVE_LOCK = new ReentrantLock();
 
     private final Arena libraryArena;
@@ -510,6 +511,40 @@ public final class SwissEph implements AutoCloseable {
                         julianDayUt, ephemerisFlags, geographicPosition, attributes, error);
                 return eclipseResult("swe_lun_eclipse_how", flags, error, new double[0],
                         readDoubles(attributes, ECLIPSE_ATTRIBUTE_COUNT), new double[0]);
+            }
+        });
+    }
+
+    /** Calculates planetary phenomena in universal time with {@code swe_pheno_ut()}. */
+    public PlanetaryPhenomena phenomenaUt(double julianDayUt, CelestialBody body,
+                                           CalculationFlag... flags) {
+        return phenomenaUt(
+                julianDayUt,
+                Objects.requireNonNull(body, "body").id(),
+                CalculationFlag.mask(flags));
+    }
+
+    /** Supports standard bodies as well as asteroid IDs. */
+    public PlanetaryPhenomena phenomenaUt(double julianDayUt, int bodyId,
+                                           CalculationFlag... flags) {
+        return phenomenaUt(julianDayUt, bodyId, CalculationFlag.mask(flags));
+    }
+
+    /** Variant accepting an already combined native {@code iflag} mask. */
+    public PlanetaryPhenomena phenomenaUt(double julianDayUt, int bodyId, int flags) {
+        ensureOpen();
+        return locked(() -> {
+            try (Arena arena = Arena.ofConfined()) {
+                MemorySegment attributes = arena.allocate(JAVA_DOUBLE, PHENOMENA_ATTRIBUTE_COUNT);
+                MemorySegment error = arena.allocate(TEXT_BUFFER_SIZE);
+                int code = nativeBindings.phenomenaUt(
+                        julianDayUt, bodyId, flags, attributes, error);
+                String message = error.getString(0);
+                if (code < 0) {
+                    throw new SwissEphException("swe_pheno_ut", code, message);
+                }
+                return new PlanetaryPhenomena(
+                        readDoubles(attributes, PHENOMENA_ATTRIBUTE_COUNT), message);
             }
         });
     }

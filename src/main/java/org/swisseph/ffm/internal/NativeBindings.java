@@ -39,6 +39,7 @@ public final class NativeBindings {
     private final MethodHandle sweLunEclipseWhen;
     private final MethodHandle sweLunEclipseWhenLoc;
     private final MethodHandle sweLunEclipseHow;
+    private final MethodHandle swePhenoUt;
 
     public NativeBindings(SymbolLookup symbols) {
         this.symbols = symbols;
@@ -89,6 +90,8 @@ public final class NativeBindings {
                 JAVA_INT, JAVA_DOUBLE, JAVA_INT, ADDRESS, ADDRESS, ADDRESS, JAVA_INT, ADDRESS));
         sweLunEclipseHow = bind("swe_lun_eclipse_how", FunctionDescriptor.of(
                 JAVA_INT, JAVA_DOUBLE, JAVA_INT, ADDRESS, ADDRESS, ADDRESS));
+        swePhenoUt = bind("swe_pheno_ut", FunctionDescriptor.of(
+                JAVA_INT, JAVA_DOUBLE, JAVA_INT, JAVA_INT, ADDRESS, ADDRESS));
     }
 
     public void version(MemorySegment versionBuffer) {
@@ -293,6 +296,15 @@ public final class NativeBindings {
                     julianDayUt, flags, geographicPosition, attributes, error);
         } catch (Throwable throwable) {
             throw invocationFailure("swe_lun_eclipse_how", throwable);
+        }
+    }
+
+    public int phenomenaUt(double julianDayUt, int bodyId, int flags,
+                           MemorySegment attributes, MemorySegment error) {
+        try {
+            return (int) swePhenoUt.invokeExact(julianDayUt, bodyId, flags, attributes, error);
+        } catch (Throwable throwable) {
+            throw invocationFailure("swe_pheno_ut", throwable);
         }
     }
 
