@@ -1,16 +1,22 @@
 package org.swisseph.ffm;
 
-/** Geographic longitude, latitude, and height used by observer-dependent calls. */
+/**
+ * An observer position: geographic longitude, latitude, and height above sea
+ * level in metres.
+ *
+ * <p>Longitude comes first, matching the {@code double geopos[3]} layout the C
+ * API expects. Every observer-dependent method takes this type rather than two
+ * bare doubles, so the two coordinates cannot be swapped by accident.</p>
+ */
 public record GeographicPosition(double longitude, double latitude, double altitudeMeters) {
     public GeographicPosition {
-        if (!Double.isFinite(longitude) || longitude < -180.0 || longitude > 180.0) {
-            throw new IllegalArgumentException("longitude must be finite and between -180 and 180 degrees");
-        }
-        if (!Double.isFinite(latitude) || latitude < -90.0 || latitude > 90.0) {
-            throw new IllegalArgumentException("latitude must be finite and between -90 and 90 degrees");
-        }
-        if (!Double.isFinite(altitudeMeters)) {
-            throw new IllegalArgumentException("altitudeMeters must be finite");
-        }
+        Validation.longitude(longitude);
+        Validation.latitude(latitude);
+        Validation.altitude(altitudeMeters);
+    }
+
+    /** Creates a position at sea level. */
+    public static GeographicPosition of(double longitude, double latitude) {
+        return new GeographicPosition(longitude, latitude, 0.0);
     }
 }

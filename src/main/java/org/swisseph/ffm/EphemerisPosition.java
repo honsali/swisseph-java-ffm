@@ -1,8 +1,16 @@
 package org.swisseph.ffm;
 
 /**
- * Six values returned by {@code swe_calc()} or {@code swe_calc_ut()}.
- * Their exact coordinate system and unit depend on the requested flags.
+ * The six values returned by {@code swe_calc()} or {@code swe_calc_ut()}.
+ *
+ * <p>Their coordinate system and unit depend on the flags that were requested,
+ * which is why the components are named neutrally. The aliases below are valid
+ * only for the default polar ecliptic output.</p>
+ *
+ * @param returnedFlags what the library actually computed, which may differ
+ *                      from what was asked for
+ * @param warning       the contents of {@code serr}; non-empty even on success
+ *                      when the library downgraded the request
  */
 public record EphemerisPosition(
         double firstCoordinate,
@@ -11,40 +19,45 @@ public record EphemerisPosition(
         double firstCoordinateSpeed,
         double secondCoordinateSpeed,
         double thirdCoordinateSpeed,
-        int returnedFlags,
+        ReturnedFlags returnedFlags,
         String warning) {
 
     public EphemerisPosition {
         warning = warning == null ? "" : warning;
     }
 
-    /** Convenience alias when polar ecliptic coordinates were requested. */
+    /** Ecliptic longitude in degrees, for the default polar output. */
     public double longitude() {
         return firstCoordinate;
     }
 
-    /** Convenience alias when polar ecliptic coordinates were requested. */
+    /** Ecliptic latitude in degrees, for the default polar output. */
     public double latitude() {
         return secondCoordinate;
     }
 
-    /** Convenience alias when polar coordinates were requested. */
+    /** Distance in astronomical units, for the default polar output. */
     public double distance() {
         return thirdCoordinate;
     }
 
-    /** Convenience alias when polar coordinates and speed were requested. */
+    /** Longitude speed in degrees per day; zero unless {@code SPEED} was requested. */
     public double longitudeSpeed() {
         return firstCoordinateSpeed;
     }
 
-    /** Convenience alias when polar coordinates and speed were requested. */
+    /** Latitude speed in degrees per day; zero unless {@code SPEED} was requested. */
     public double latitudeSpeed() {
         return secondCoordinateSpeed;
     }
 
-    /** Convenience alias when polar coordinates and speed were requested. */
+    /** Distance speed in AU per day; zero unless {@code SPEED} was requested. */
     public double distanceSpeed() {
         return thirdCoordinateSpeed;
+    }
+
+    /** Returns whether the body is retrograde, that is moving backwards in longitude. */
+    public boolean isRetrograde() {
+        return firstCoordinateSpeed < 0.0;
     }
 }

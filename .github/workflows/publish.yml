@@ -10,7 +10,15 @@ permissions:
   packages: write
 
 jobs:
+  # Nothing is published until the binding has been exercised against a real
+  # Swiss Ephemeris build on every supported platform.
+  verify:
+    name: Verify
+    uses: ./.github/workflows/native-tests.yml
+
   publish:
+    name: Publish
+    needs: verify
     runs-on: ubuntu-latest
 
     steps:

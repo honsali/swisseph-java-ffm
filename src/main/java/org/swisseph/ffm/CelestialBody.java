@@ -1,7 +1,14 @@
 package org.swisseph.ffm;
 
-/** Standard body identifiers used by Swiss Ephemeris 2.10.03. */
+/**
+ * Standard body identifiers used by Swiss Ephemeris.
+ *
+ * <p>Asteroids, planetary moons, and fictitious bodies are addressed by number
+ * rather than by constant; {@link #asteroid(int)} and {@link #planetaryMoon(int)}
+ * apply the offsets the C API expects.</p>
+ */
 public enum CelestialBody {
+    /** {@code SE_ECL_NUT}: obliquity and nutation rather than a body. */
     ECLIPTIC_NUTATION(-1),
     SUN(0),
     MOON(1),
@@ -27,6 +34,11 @@ public enum CelestialBody {
     INTERPOLATED_APOGEE(21),
     INTERPOLATED_PERIGEE(22);
 
+    /** {@code SE_AST_OFFSET}. */
+    public static final int ASTEROID_OFFSET = 10_000;
+    /** {@code SE_PLMOON_OFFSET}. */
+    public static final int PLANETARY_MOON_OFFSET = 9_000;
+
     private final int id;
 
     CelestialBody(int id) {
@@ -36,5 +48,26 @@ public enum CelestialBody {
     /** Returns the {@code ipl} value expected by the C API. */
     public int id() {
         return id;
+    }
+
+    /**
+     * Returns the {@code ipl} value for a numbered asteroid.
+     *
+     * @param minorPlanetNumber the MPC number, for example 433 for Eros
+     */
+    public static int asteroid(int minorPlanetNumber) {
+        if (minorPlanetNumber <= 0) {
+            throw new IllegalArgumentException(
+                    "minorPlanetNumber must be positive, but was " + minorPlanetNumber);
+        }
+        return ASTEROID_OFFSET + minorPlanetNumber;
+    }
+
+    /** Returns the {@code ipl} value for a planetary moon. */
+    public static int planetaryMoon(int moonNumber) {
+        if (moonNumber <= 0) {
+            throw new IllegalArgumentException("moonNumber must be positive, but was " + moonNumber);
+        }
+        return PLANETARY_MOON_OFFSET + moonNumber;
     }
 }

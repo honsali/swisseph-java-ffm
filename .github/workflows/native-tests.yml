@@ -1,0 +1,170 @@
+name: Native tests
+
+# Builds Swiss Ephemeris from the exact upstream tag and runs the full suite
+# against it on Linux, macOS, and Windows.
+#
+# This is a reusable workflow so that both continuous integration and the
+# release pipeline run it: a Foreign Function and Memory binding whose function
+# descriptors are wrong does not fail to compile, and often does not even crash.
+# It reads the wrong register and returns a plausible number. Executing the real
+# calls on every supported platform is the only thing that catches that, so no
+# artifact is published without it.
+
+on:
+  workflow_call:
+    inputs:
+      swisseph-tag:
+        description: Upstream Swiss Ephemeris tag to build against
+        type: string
+        default: v2.10.03
+      ephemeris-commit:
+        description: >
+          Commit of aloistr/swisseph to take the ephemeris data files from. The
+          ephe directory does not exist at the release tags, so it has to be
+          pinned separately; tracking a branch would let the data under the
+          reference tests change without a commit here.
+        type: string
+        default: 3fd0f956d73898b91cc4f67cf18b21af656d1342
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            library: libswe.so
+          - os: macos-latest
+            library: libswe.dylib
+          - os: windows-latest
+            library: swe.dll
+
+    steps:
+      - name: Checkout binding
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+
+      - name: Cache the native library and ephemeris data
+        id: native-cache
+        uses: actions/cache@v4
+        with:
+          path: native
+          key: native-${{ matrix.os }}-${{ inputs.swisseph-tag }}-${{ inputs.ephemeris-commit }}-v1
+
+      - name: Check out Swiss Ephemeris sources
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@v6
+        with:
+          repository: aloistr/swisseph
+          ref: ${{ inputs.swisseph-tag }}
+          path: swisseph-src
+
+      - name: Locate a C compiler on Windows
+        if: runner.os == 'Windows' && steps.native-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for candidate in \
+              /c/msys64/mingw64/bin \
+              /c/mingw64/bin \
+              /c/Strawberry/c/bin \
+              /c/ProgramData/chocolatey/bin; do
+            if [ -x "$candidate/gcc.exe" ]; then
+              echo "Found gcc in $candidate"
+              echo "$candidate" >> "$GITHUB_PATH"
+              exit 0
+            fi
+          done
+          if command -v gcc >/dev/null 2>&1; then
+            echo "Found gcc on PATH: $(command -v gcc)"
+            exit 0
+          fi
+          echo "::error::No gcc found on the Windows runner. Add an MSYS2 setup step."
+          exit 1
+
+      - name: Build the Swiss Ephemeris shared library
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native
+          cd swisseph-src
+          # The library sources, taken from the SWEOBJ list in the upstream
+          # Makefile. swetest.c, swemini.c and swevents.c are excluded: they
+          # define main().
+          sources="swedate.c swehouse.c swejpl.c swemmoon.c swemplan.c sweph.c swephlib.c swecl.c swehel.c"
+          case "${{ runner.os }}" in
+            Linux)
+              gcc -O2 -fPIC -shared -o "../native/${{ matrix.library }}" $sources -lm -ldl
+              ;;
+            macOS)
+              cc -O2 -fPIC -dynamiclib -o "../native/${{ matrix.library }}" $sources -lm
+              ;;
+            Windows)
+              gcc -O2 -shared -o "../native/${{ matrix.library }}" $sources -lm
+              ;;
+          esac
+          ls -l "../native/${{ matrix.library }}"
+
+      - name: Download the Swiss Ephemeris data files
+        if: steps.native-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native/ephe
+          base="https://raw.githubusercontent.com/aloistr/swisseph/${{ inputs.ephemeris-commit }}/ephe"
+          # sepl_18 and semo_18 cover 1800-2399, which spans every date the
+          # reference tests use. sefstars.txt is the fixed-star catalogue.
+          for file in sepl_18.se1 semo_18.se1 sefstars.txt; do
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-delay 5 \
+              -o "native/ephe/$file" "$base/$file"
+          done
+          ls -l native/ephe
+
+      - name: Build and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          library="$(cd native && pwd)/${{ matrix.library }}"
+          ephemeris="$(cd native/ephe && pwd)"
+          mvn --batch-mode --no-transfer-progress verify \
+            "-Dswisseph.integration.library=$library" \
+            "-Dswisseph.integration.ephemeris=$ephemeris"
+
+      - name: Fail if the native tests were skipped
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A skipped native suite looks exactly like a passing build, which is
+          # how the previous setup shipped untested bindings. Assert that the
+          # integration tests actually ran.
+          skipped=0
+          for report in target/surefire-reports/TEST-*IntegrationTest.xml; do
+            [ -e "$report" ] || { echo "::error::No integration test report found"; exit 1; }
+            if grep -q 'skipped="[1-9]' "$report"; then
+              echo "::error::Integration tests were skipped in $report"
+              skipped=1
+            fi
+            grep -o 'tests="[0-9]*"' "$report" | head -1
+          done
+          exit $skipped
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ matrix.os }}
+          path: target/surefire-reports/
+          if-no-files-found: ignore

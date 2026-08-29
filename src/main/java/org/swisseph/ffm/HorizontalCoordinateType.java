@@ -1,8 +1,10 @@
 package org.swisseph.ffm;
 
-/** Input coordinate systems accepted by {@code swe_azalt()}. */
+/** Input coordinate system accepted by {@code swe_azalt()}. */
 public enum HorizontalCoordinateType {
+    /** {@code SE_ECL2HOR}. */
     ECLIPTIC(0),
+    /** {@code SE_EQU2HOR}. */
     EQUATORIAL(1);
 
     private final int nativeValue;
@@ -11,8 +13,7 @@ public enum HorizontalCoordinateType {
         this.nativeValue = nativeValue;
     }
 
-    /** Returns {@code SE_ECL2HOR} or {@code SE_EQU2HOR}. */
-    public int nativeValue() {
+    public int value() {
         return nativeValue;
     }
 }

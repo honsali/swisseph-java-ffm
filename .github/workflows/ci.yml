@@ -1,0 +1,15 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native-tests:
+    name: Native tests
+    uses: ./.github/workflows/native-tests.yml
