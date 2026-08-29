@@ -35,6 +35,23 @@ jobs:
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
 
+      - name: Check the release tag matches the POM version
+        if: github.event_name == 'release'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A tag that disagrees with the POM publishes a version nobody asked
+          # for, and a Maven version is immutable once released.
+          pom="$(mvn --batch-mode --no-transfer-progress -q \
+            org.apache.maven.plugins:maven-help-plugin:3.5.1:evaluate \
+            -Dexpression=project.version -DforceStdout)"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$pom" != "$tag" ]; then
+            echo "::error::Release tag $GITHUB_REF_NAME does not match POM version $pom"
+            exit 1
+          fi
+          echo "Publishing version $pom for tag $GITHUB_REF_NAME"
+
       - name: Build and publish package
         run: mvn --batch-mode --no-transfer-progress clean deploy
         env:

@@ -40,6 +40,16 @@ public enum EclipseType {
         return mask;
     }
 
+    /** Whether this kind can describe a solar eclipse. */
+    public boolean isSolar() {
+        return this != PENUMBRAL;
+    }
+
+    /** Whether this kind can describe a lunar eclipse. */
+    public boolean isLunar() {
+        return this == TOTAL || this == PARTIAL || this == PENUMBRAL;
+    }
+
     /** {@code SE_ECL_ALLTYPES_SOLAR}. */
     public static Set<EclipseType> allSolar() {
         return EnumSet.of(CENTRAL, NON_CENTRAL, TOTAL, ANNULAR, PARTIAL, ANNULAR_TOTAL);

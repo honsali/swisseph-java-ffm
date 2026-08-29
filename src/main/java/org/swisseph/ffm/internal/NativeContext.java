@@ -155,7 +155,7 @@ public final class NativeContext {
             });
             String version = runOn(executor, () -> {
                 try (Arena call = Arena.ofConfined()) {
-                    MemorySegment buffer = call.allocate(NativeBindings.AS_MAXCH);
+                    MemorySegment buffer = call.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                     bindings.version(buffer);
                     return NativeStrings.readBuffer(buffer);
                 }
@@ -222,6 +222,35 @@ public final class NativeContext {
 
     private static <T> T runOn(ExecutorService executor, Callable<T> task) {
         return await(submit(executor, task));
+    }
+
+    /**
+     * Waits for the closing task without letting an interrupt abandon it.
+     *
+     * <p>By the time this runs the context is already out of the registry and
+     * marked closed, so there is nothing to retry with: giving up here would
+     * leave {@code swe_close()} un-run and, worse, let {@code arena.close()}
+     * unload the library while the task is still inside a downcall. The
+     * interrupt is remembered and re-raised once the thread and the arena have
+     * actually been released.</p>
+     */
+    private static <T> T awaitUninterruptibly(Future<T> future) {
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try {
+                    return future.get();
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                } catch (ExecutionException wrapped) {
+                    throw unwrap(wrapped);
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**
@@ -296,7 +325,7 @@ public final class NativeContext {
             submitLock.unlock();
         }
         try {
-            await(closeTask);
+            awaitUninterruptibly(closeTask);
         } catch (RuntimeException failure) {
             // swe_close() only frees native buffers. Report it, but never let it
             // stop us from releasing the thread and the arena.
@@ -304,15 +333,34 @@ public final class NativeContext {
                     .log(System.Logger.Level.WARNING, "swe_close() failed for " + libraryPath, failure);
         } finally {
             executor.shutdown();
+            boolean interrupted = false;
+            boolean terminated = false;
             try {
-                if (!executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
-                    executor.shutdownNow();
+                // The close task has already returned and nothing new can be
+                // queued, so this only waits for the thread itself to wind up.
+                // Never shutdownNow() here: interrupting a thread that is inside
+                // a downcall would let arena.close() unload the library beneath
+                // it, which is a crash rather than an exception.
+                while (!terminated) {
+                    try {
+                        terminated = executor.awaitTermination(
+                                SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+                        if (!terminated) {
+                            System.getLogger(NativeContext.class.getName()).log(
+                                    System.Logger.Level.WARNING,
+                                    "Swiss Ephemeris native thread for " + libraryPath
+                                            + " has not stopped; still waiting before unloading");
+                        }
+                    } catch (InterruptedException ignored) {
+                        interrupted = true;
+                    }
                 }
-            } catch (InterruptedException interrupted) {
-                executor.shutdownNow();
-                Thread.currentThread().interrupt();
+            } finally {
+                arena.close();
+                if (interrupted) {
+                    Thread.currentThread().interrupt();
+                }
             }
-            arena.close();
         }
     }
 

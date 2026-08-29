@@ -8,6 +8,7 @@ import java.nio.file.Path;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.swisseph.ffm.NativeTestSupport.angularDistance;
 import static org.swisseph.ffm.NativeTestSupport.minutes;
@@ -313,12 +314,21 @@ class ReferenceValueIntegrationTest {
                     AtmosphericConditions.STANDARD,
                     sun.longitude(), sun.latitude(), sun.distance());
 
-            EclipticCoordinates back = swe.azimuthAltitudeReverse(
+            SphericalCoordinates back = swe.azimuthAltitudeReverse(
                     J2000, HorizontalCoordinateType.ECLIPTIC, observer,
                     horizontal.azimuth(), horizontal.trueAltitude());
 
-            assertEquals(0.0, angularDistance(back.longitude(), sun.longitude()), 1.0e-4);
-            assertEquals(sun.latitude(), back.latitude(), 1.0e-4);
+            assertEquals(0.0, angularDistance(back.eclipticLongitude(), sun.longitude()), 1.0e-4);
+            assertEquals(sun.latitude(), back.eclipticLatitude(), 1.0e-4);
+            // Asking for the equatorial reading of an ecliptic conversion is a
+            // labelling mistake, not a value the caller should silently receive.
+            assertThrows(IllegalStateException.class, back::rightAscension);
+
+            SphericalCoordinates equatorial = swe.azimuthAltitudeReverse(
+                    J2000, HorizontalCoordinateType.EQUATORIAL, observer,
+                    horizontal.azimuth(), horizontal.trueAltitude());
+            assertTrue(Math.abs(equatorial.declination()) <= 90.0);
+            assertThrows(IllegalStateException.class, equatorial::eclipticLongitude);
 
             // Refraction lifts a body near the horizon, never lowers it.
             assertTrue(horizontal.apparentAltitude() >= horizontal.trueAltitude() - 1.0e-9);
@@ -399,13 +409,16 @@ class ReferenceValueIntegrationTest {
             assertEquals(45.1, central.latitude(), 3.0,
                     "central line latitude was " + central.latitude());
 
-            SolarEclipseAttributes circumstances = swe.solarEclipseHow(
+            SolarEclipseCircumstances circumstances = swe.solarEclipseHow(
                     greatestEclipse, ephemerisFlag().value(), central.toObserver());
+            assertTrue(circumstances.isEclipsed(),
+                    "the native return value carries the eclipse type, not just an error code");
+            assertTrue(circumstances.flags().has(EclipseType.TOTAL));
             assertTrue(circumstances.magnitude() > 0.99,
                     "the eclipse was total on the central line, magnitude was "
                             + circumstances.magnitude());
             assertTrue(circumstances.obscuration() > 0.99);
-            assertTrue(circumstances.sunApparentAltitude() > 0.0,
+            assertTrue(circumstances.attributes().sunApparentAltitude() > 0.0,
                     "the Sun must be above the horizon on the central line");
         }
     }
@@ -469,17 +482,20 @@ class ReferenceValueIntegrationTest {
                     swe.julianDay(2000, 1, 21, 4.0 + 44.0 / 60.0, CalendarType.GREGORIAN);
 
             // Visible from the Americas; Washington DC had the Moon high in the sky.
-            LunarEclipseAttributes circumstances = swe.lunarEclipseHow(
+            LunarEclipseCircumstances circumstances = swe.lunarEclipseHow(
                     greatestEclipse, ephemerisFlag().value(),
                     GeographicPosition.of(-77.0369, 38.9072));
 
+            assertTrue(circumstances.isEclipsed());
+            assertTrue(circumstances.flags().has(EclipseType.TOTAL));
             assertTrue(circumstances.umbralMagnitude() > 1.0,
                     "a total lunar eclipse has umbral magnitude above 1, was "
                             + circumstances.umbralMagnitude());
-            assertTrue(circumstances.penumbralMagnitude() > circumstances.umbralMagnitude());
-            assertTrue(circumstances.moonApparentAltitude() > 0.0,
+            LunarEclipseAttributes attributes = circumstances.attributes();
+            assertTrue(attributes.penumbralMagnitude() > attributes.umbralMagnitude());
+            assertTrue(attributes.moonApparentAltitude() > 0.0,
                     "the Moon was above the horizon at Washington");
-            assertTrue(circumstances.oppositionDistance() < 2.0,
+            assertTrue(attributes.oppositionDistance() < 2.0,
                     "an eclipsed Moon sits close to opposition");
         }
     }
@@ -642,6 +658,140 @@ class ReferenceValueIntegrationTest {
             assertEquals("Sun", swe.bodyName(CelestialBody.SUN));
             assertEquals("Moon", swe.bodyName(CelestialBody.MOON));
             assertEquals("Pluto", swe.bodyName(CelestialBody.PLUTO));
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Entry points that would otherwise never meet the native library
+    // ------------------------------------------------------------------
+
+    @Test
+    @DisplayName("The ephemeris-time UTC conversion agrees with the universal-time one")
+    void ephemerisTimeToUtcAgreesWithUniversalTime() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            UtcDateTime utc = new UtcDateTime(2015, 6, 30, 23, 59, 59.0);
+            JulianDate julian = swe.utcToJulianDay(utc, CalendarType.GREGORIAN);
+
+            // Both directions have their own native function, and each has to be
+            // exercised: a wrong descriptor on either would go unnoticed.
+            UtcDateTime fromEt =
+                    swe.ephemerisTimeToUtc(julian.ephemerisTime(), CalendarType.GREGORIAN);
+            UtcDateTime fromUt =
+                    swe.universalTimeToUtc(julian.universalTime(), CalendarType.GREGORIAN);
+
+            assertEquals(fromUt.year(), fromEt.year());
+            assertEquals(fromUt.month(), fromEt.month());
+            assertEquals(fromUt.day(), fromEt.day());
+            assertEquals(fromUt.hour(), fromEt.hour());
+            assertEquals(fromUt.minute(), fromEt.minute());
+            assertEquals(fromUt.second(), fromEt.second(), 1.0e-3);
+            assertEquals(2015, fromEt.year());
+            assertEquals(6, fromEt.month());
+        }
+    }
+
+    @Test
+    @DisplayName("Phenomena in ephemeris time match phenomena in universal time")
+    void phenomenaInEphemerisTimeMatch() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            double deltaT = swe.deltaT(J2000);
+            PlanetaryPhenomena fromUt =
+                    swe.phenomenaUt(J2000, CelestialBody.VENUS, ephemerisFlag());
+            PlanetaryPhenomena fromEt =
+                    swe.phenomena(J2000 + deltaT, CelestialBody.VENUS, ephemerisFlag());
+
+            assertEquals(fromUt.phaseAngle(), fromEt.phaseAngle(), 1.0e-9);
+            assertEquals(fromUt.illuminatedFraction(), fromEt.illuminatedFraction(), 1.0e-12);
+        }
+    }
+
+    @Test
+    @DisplayName("The ayanamsha in ephemeris time matches the one in universal time")
+    void ayanamshaInEphemerisTimeMatches() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            swe.setSiderealMode(SiderealMode.LAHIRI);
+            double deltaT = swe.deltaT(J2000);
+
+            assertEquals(swe.ayanamsaUt(J2000), swe.ayanamsa(J2000 + deltaT), 1.0e-9);
+        }
+    }
+
+    @Test
+    @DisplayName("A fixed star rises, and later than the Sun does in June")
+    void fixedStarsRiseAndSet() {
+        NativeTestSupport.requireFixedStarCatalogue();
+        try (SwissEph swe = NativeTestSupport.open()) {
+            double startOfDay = swe.julianDay(2000, 6, 21, 0.0, CalendarType.GREGORIAN);
+            GeographicPosition observer = GeographicPosition.of(0.0, 0.0);
+
+            RiseTransitResult siriusRise = swe.riseTransit(startOfDay, "Sirius",
+                    ephemerisFlag().value(), RiseTransitFlag.RISE.value(),
+                    observer, AtmosphericConditions.STANDARD);
+
+            assertTrue(siriusRise.found());
+            assertTrue(siriusRise.julianDayUt() >= startOfDay);
+            assertTrue(siriusRise.julianDayUt() < startOfDay + 2.0,
+                    "a star at declination -17 rises daily from the equator");
+
+            RiseTransitResult transit = swe.riseTransit(startOfDay, "Sirius",
+                    ephemerisFlag().value(), RiseTransitFlag.UPPER_MERIDIAN_TRANSIT.value(),
+                    observer, AtmosphericConditions.STANDARD);
+            assertTrue(transit.found());
+            assertTrue(transit.julianDayUt() > siriusRise.julianDayUt(),
+                    "a body transits after it rises");
+        }
+    }
+
+    @Test
+    @DisplayName("The local lunar eclipse search finds the January 2000 eclipse")
+    void localLunarEclipseSearchFindsTheEclipse() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            double searchFrom = swe.julianDay(2000, 1, 1, 0.0, CalendarType.GREGORIAN);
+            // Visible from Washington, where the Moon stood high during totality.
+            LocalLunarEclipse eclipse = swe.lunarEclipseWhenLocal(searchFrom,
+                    ephemerisFlag().value(), GeographicPosition.of(-77.0369, 38.9072), false);
+
+            assertEquals(swe.julianDay(2000, 1, 21, 4.0 + 44.0 / 60.0, CalendarType.GREGORIAN),
+                    eclipse.maximum(), minutes(20.0));
+            assertTrue(eclipse.isVisible());
+            assertTrue(eclipse.flags().has(EclipseType.TOTAL));
+            assertTrue(eclipse.attributes().umbralMagnitude() > 1.0);
+        }
+    }
+
+    @Test
+    @DisplayName("Searches refuse a kind of eclipse they could never find")
+    void searchesRefuseImpossibleEclipseKinds() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            double searchFrom = swe.julianDay(2000, 1, 1, 0.0, CalendarType.GREGORIAN);
+
+            // A penumbral eclipse is a lunar phenomenon. Asking the solar search
+            // for one sends the native loop hunting for something that cannot exist.
+            assertThrows(IllegalArgumentException.class, () -> swe.solarEclipseWhenGlobal(
+                    searchFrom, ephemerisFlag().value(),
+                    java.util.Set.of(EclipseType.PENUMBRAL), false));
+
+            assertThrows(IllegalArgumentException.class, () -> swe.lunarEclipseWhen(
+                    searchFrom, ephemerisFlag().value(),
+                    java.util.Set.of(EclipseType.ANNULAR), false));
+        }
+    }
+
+    @Test
+    @DisplayName("A rise search demands exactly one event")
+    void riseSearchDemandsExactlyOneEvent() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            double startOfDay = swe.julianDay(2000, 3, 20, 0.0, CalendarType.GREGORIAN);
+            GeographicPosition observer = GeographicPosition.of(0.0, 0.0);
+
+            // No event bit at all: the native code would silently answer "rise".
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    startOfDay, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD));
+
+            // Two at once: upstream picks one by internal priority.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    startOfDay, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.SET));
         }
     }
 

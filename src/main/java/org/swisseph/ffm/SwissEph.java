@@ -152,12 +152,53 @@ public final class SwissEph implements AutoCloseable {
         System.getLogger(SwissEph.class.getName()).log(System.Logger.Level.WARNING, message);
     }
 
+    /**
+     * Pushes the whole configuration in one native task.
+     *
+     * <p>One task, not four: the settings are process-wide, so applying them as
+     * separate units of work would let a concurrent open or calculation observe
+     * a hybrid state -- the ephemeris path of one configuration with the
+     * sidereal mode of another.</p>
+     */
     private void applyConfiguredSettings() {
-        config.ephemerisPath().ifPresent(this::setEphemerisPath);
-        config.jplFile().ifPresent(this::setJplFile);
-        config.topocentricObserver().ifPresent(this::setTopocentricObserver);
-        config.siderealMode().ifPresent(mode ->
-                setSiderealMode(mode, config.siderealT0(), config.siderealAyanamsaAtT0()));
+        if (config.ephemerisPath().isEmpty() && config.jplFile().isEmpty()
+                && config.topocentricObserver().isEmpty() && config.siderealMode().isEmpty()) {
+            return;
+        }
+        config.ephemerisPath().ifPresent(path ->
+                NativeStrings.requireNativeSafe(path, "ephemerisPath", MAX_EPHEMERIS_PATH_BYTES + 1));
+        config.jplFile().ifPresent(file ->
+                NativeStrings.requireNativeSafe(file, "jplFile", NativeBindings.AS_MAXCH));
+        call(bindings -> {
+            SwissEphSettings applied = context.settings();
+            try (Arena arena = Arena.ofConfined()) {
+                if (config.ephemerisPath().isPresent()) {
+                    String path = config.ephemerisPath().orElseThrow();
+                    bindings.setEphemerisPath(arena.allocateFrom(path));
+                    applied = applied.withEphemerisPath(path);
+                }
+                if (config.jplFile().isPresent()) {
+                    String file = config.jplFile().orElseThrow();
+                    bindings.setJplFile(arena.allocateFrom(file));
+                    applied = applied.withJplFile(file);
+                }
+            }
+            if (config.topocentricObserver().isPresent()) {
+                GeographicPosition observer = config.topocentricObserver().orElseThrow();
+                bindings.setTopocentricPosition(
+                        observer.longitude(), observer.latitude(), observer.altitudeMeters());
+                applied = applied.withTopocentricObserver(observer);
+            }
+            if (config.siderealMode().isPresent()) {
+                int mode = config.siderealMode().orElseThrow();
+                bindings.setSiderealMode(
+                        mode, config.siderealT0(), config.siderealAyanamsaAtT0());
+                applied = applied.withSiderealMode(
+                        mode, config.siderealT0(), config.siderealAyanamsaAtT0());
+            }
+            context.settings(applied);
+            return null;
+        });
     }
 
     /**
@@ -202,7 +243,7 @@ public final class SwissEph implements AutoCloseable {
     public String nativeLibraryPath() {
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment buffer = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment buffer = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 bindings.libraryPath(buffer);
                 return NativeStrings.readBuffer(buffer);
             }
@@ -333,6 +374,10 @@ public final class SwissEph implements AutoCloseable {
     /** Selects a predefined ayanamsha for {@link CalculationFlag#SIDEREAL}. */
     public void setSiderealMode(SiderealMode mode, SiderealOption... options) {
         Objects.requireNonNull(mode, "mode");
+        if (mode == SiderealMode.USER) {
+            throw new IllegalArgumentException("SiderealMode.USER defines its ayanamsha from t0 "
+                    + "and ayanamsaAtT0; use setSiderealMode(int, double, double) to supply them");
+        }
         setSiderealMode(mode.value() | SiderealOption.mask(options), 0.0, 0.0);
     }
 
@@ -345,6 +390,12 @@ public final class SwissEph implements AutoCloseable {
      * @param ayanamsaAtT0 ayanamsha at {@code t0}, for {@link SiderealMode#USER}
      */
     public void setSiderealMode(int mode, double t0, double ayanamsaAtT0) {
+        if (mode < 0) {
+            // Upstream folds a negative mode back to Fagan/Bradley, but the value
+            // recorded in settings() would keep saying something else.
+            throw new IllegalArgumentException(
+                    "sidereal mode must not be negative, but was " + mode);
+        }
         Validation.finite(t0, "t0");
         Validation.finite(ayanamsaAtT0, "ayanamsaAtT0");
         call(bindings -> {
@@ -369,7 +420,7 @@ public final class SwissEph implements AutoCloseable {
     public String bodyName(int bodyId) {
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment buffer = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment buffer = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 bindings.planetName(bodyId, buffer);
                 return NativeStrings.readBuffer(buffer);
             }
@@ -381,8 +432,21 @@ public final class SwissEph implements AutoCloseable {
         return ayanamsaName(Objects.requireNonNull(mode, "mode").value());
     }
 
-    /** The name {@code swe_get_ayanamsa_name()} gives a raw sidereal-mode value. */
+    /**
+     * The name {@code swe_get_ayanamsa_name()} gives a raw sidereal-mode value.
+     *
+     * <p>Returns an empty string for a mode the library does not define.</p>
+     *
+     * @throws IllegalArgumentException if {@code mode} is negative. The C code
+     *         reduces the argument with {@code isidmode %= 256} and then checks
+     *         only the upper bound, so a negative value reaches
+     *         {@code ayanamsa_name[-1]} and reads outside the table.
+     */
     public String ayanamsaName(int mode) {
+        if (mode < 0) {
+            throw new IllegalArgumentException(
+                    "sidereal mode must not be negative, but was " + mode);
+        }
         return call(bindings -> {
             String name = NativeStrings.read(bindings.ayanamsaName(mode), NativeBindings.AS_MAXCH);
             return name == null ? "" : name;
@@ -437,7 +501,7 @@ public final class SwissEph implements AutoCloseable {
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment result = arena.allocate(JAVA_DOUBLE, 2);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int code = bindings.utcToJulianDay(utc.year(), utc.month(), utc.day(), utc.hour(),
                         utc.minute(), utc.second(), calendar.value(), result, error);
                 if (code < 0) {
@@ -545,7 +609,7 @@ public final class SwissEph implements AutoCloseable {
         Validation.julianDay(julianDay, "julianDay");
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 return bindings.deltaTEx(julianDay, ephemerisFlags, error);
             }
         });
@@ -599,7 +663,7 @@ public final class SwissEph implements AutoCloseable {
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment values = arena.allocate(JAVA_DOUBLE, POSITION_VALUE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int returnedFlags = universalTime
                         ? bindings.calcUt(julianDay, bodyId, flags, values, error)
                         : bindings.calc(julianDay, bodyId, flags, values, error);
@@ -652,7 +716,7 @@ public final class SwissEph implements AutoCloseable {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment star = allocateStarName(arena, starName);
                 MemorySegment values = arena.allocate(JAVA_DOUBLE, POSITION_VALUE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int returnedFlags = indexed
                         ? bindings.fixedStar2Ut(star, julianDayUt, flags, values, error)
                         : bindings.fixedStarUt(star, julianDayUt, flags, values, error);
@@ -677,7 +741,7 @@ public final class SwissEph implements AutoCloseable {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment star = allocateStarName(arena, starName);
                 MemorySegment magnitude = arena.allocate(JAVA_DOUBLE);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int code = bindings.fixedStar2Magnitude(star, magnitude, error);
                 if (code < 0) {
                     throw new SwissEphException(
@@ -717,7 +781,7 @@ public final class SwissEph implements AutoCloseable {
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment attributes = arena.allocate(JAVA_DOUBLE, PHENOMENA_ATTRIBUTE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int code = universalTime
                         ? bindings.phenomenaUt(julianDay, bodyId, flags, attributes, error)
                         : bindings.phenomena(julianDay, bodyId, flags, attributes, error);
@@ -747,7 +811,7 @@ public final class SwissEph implements AutoCloseable {
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment result = arena.allocate(JAVA_DOUBLE);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int code = universalTime
                         ? bindings.ayanamsaUt(julianDay, flags, result, error)
                         : bindings.ayanamsa(julianDay, flags, result, error);
@@ -885,13 +949,27 @@ public final class SwissEph implements AutoCloseable {
     /**
      * The house a body falls in, from {@code swe_house_pos()}.
      *
+     * <p>The Sunshine systems are refused. {@code swe_house_pos()} has nowhere to
+     * take the Sun's declination from, so it writes the {@code ascmc[9] == 99}
+     * sentinel and the library falls back to a declination cached from whatever
+     * call happened to run before -- upstream's own comment there says this "can
+     * lead to bugs". The same request would then answer differently depending on
+     * unrelated history, so it is rejected rather than served.</p>
+     *
      * @return a value from 1.0 to just under 13.0, where the fractional part is
-     *         the progress through the house
+     *         the progress through the house; 1.0 to just under 37.0 for
+     *         {@link HouseSystem#GAUQUELIN}
+     * @throws IllegalArgumentException if {@code houseSystem} is a Sunshine system
      */
     public double housePosition(double armc, double latitude, double eclipticObliquity,
                                 HouseSystem houseSystem, double eclipticLongitude,
                                 double eclipticLatitude) {
         Objects.requireNonNull(houseSystem, "houseSystem");
+        if (houseSystem.needsSolarDeclination()) {
+            throw new IllegalArgumentException(houseSystem + " needs the Sun's declination, which "
+                    + "swe_house_pos() cannot be given: it would silently reuse a declination "
+                    + "cached from an earlier, unrelated call.");
+        }
         Validation.degrees(armc, "armc");
         Validation.latitude(latitude);
         Validation.degrees(eclipticObliquity, "eclipticObliquity");
@@ -902,7 +980,7 @@ public final class SwissEph implements AutoCloseable {
                 MemorySegment input = arena.allocate(JAVA_DOUBLE, 2);
                 input.setAtIndex(JAVA_DOUBLE, 0, eclipticLongitude);
                 input.setAtIndex(JAVA_DOUBLE, 1, eclipticLatitude);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 double result = bindings.housePosition(armc, latitude, eclipticObliquity,
                         houseSystem.code(), input, error);
                 String message = NativeStrings.readBuffer(error);
@@ -962,7 +1040,7 @@ public final class SwissEph implements AutoCloseable {
      *                       selects {@code SE_HOR2EQU}
      * @param trueAltitude   the geometric altitude, refraction excluded
      */
-    public EclipticCoordinates azimuthAltitudeReverse(
+    public SphericalCoordinates azimuthAltitudeReverse(
             double julianDayUt,
             HorizontalCoordinateType coordinateType,
             GeographicPosition observer,
@@ -982,9 +1060,10 @@ public final class SwissEph implements AutoCloseable {
                 MemorySegment result = arena.allocate(JAVA_DOUBLE, 2);
                 bindings.azaltReverse(julianDayUt, coordinateType.value(), geographicPosition,
                         input, result);
-                return new EclipticCoordinates(
+                return new SphericalCoordinates(
                         result.getAtIndex(JAVA_DOUBLE, 0),
-                        result.getAtIndex(JAVA_DOUBLE, 1));
+                        result.getAtIndex(JAVA_DOUBLE, 1),
+                        coordinateType);
             }
         });
     }
@@ -1020,6 +1099,12 @@ public final class SwissEph implements AutoCloseable {
                 atmosphere);
     }
 
+    /** The four {@code SE_CALC_*} event bits; the rest are options. */
+    private static final int RISE_TRANSIT_EVENT_MASK =
+            RiseTransitFlag.RISE.value() | RiseTransitFlag.SET.value()
+                    | RiseTransitFlag.UPPER_MERIDIAN_TRANSIT.value()
+                    | RiseTransitFlag.LOWER_MERIDIAN_TRANSIT.value();
+
     private RiseTransitResult riseTransit(double startJulianDayUt, int bodyId, String starName,
                                           int ephemerisFlags, int eventFlags,
                                           GeographicPosition observer,
@@ -1027,14 +1112,28 @@ public final class SwissEph implements AutoCloseable {
         Objects.requireNonNull(observer, "observer");
         Objects.requireNonNull(atmosphere, "atmosphere");
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
-        return call(bindings -> {
+        int events = eventFlags & RISE_TRANSIT_EVENT_MASK;
+        if (events == 0) {
+            // The native code treats "no event requested" as a rise. Answering a
+            // question that was never asked is worse than refusing it.
+            throw new IllegalArgumentException("one of RISE, SET, UPPER_MERIDIAN_TRANSIT or "
+                    + "LOWER_MERIDIAN_TRANSIT must be requested");
+        }
+        if (Integer.bitCount(events) > 1) {
+            // Upstream resolves a combination by internal priority, so the caller
+            // would get one of them without being told which.
+            throw new IllegalArgumentException(
+                    "exactly one event may be requested at a time, but the mask asked for "
+                            + Integer.bitCount(events));
+        }
+        return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment star = starName == null
                         ? MemorySegment.NULL
                         : allocateStarName(arena, starName);
                 MemorySegment geographicPosition = allocateObserver(arena, observer);
                 MemorySegment result = arena.allocate(JAVA_DOUBLE, RISE_TRANSIT_VALUE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int code = bindings.riseTransit(startJulianDayUt, bodyId, star, ephemerisFlags,
                         eventFlags, geographicPosition, atmosphere.pressureMillibar(),
                         atmosphere.temperatureCelsius(), result, error);
@@ -1061,11 +1160,11 @@ public final class SwissEph implements AutoCloseable {
                                                      java.util.Collection<EclipseType> types,
                                                      boolean backward) {
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
-        int typeMask = EclipseType.mask(Objects.requireNonNull(types, "types"));
+        int typeMask = EclipseType.mask(requireEclipseTypes(types, true));
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.solarEclipseWhenGlobal(startJulianDayUt, ephemerisFlags,
                         typeMask, times, backward ? 1 : 0, error);
                 String message = NativeStrings.readBuffer(error);
@@ -1091,12 +1190,12 @@ public final class SwissEph implements AutoCloseable {
                                                    GeographicPosition observer, boolean backward) {
         Objects.requireNonNull(observer, "observer");
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
-        return call(bindings -> {
+        return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment geographicPosition = allocateObserver(arena, observer);
                 MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
                 MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.solarEclipseWhenLocal(startJulianDayUt, ephemerisFlags,
                         geographicPosition, times, attributes, backward ? 1 : 0, error);
                 String message = NativeStrings.readBuffer(error);
@@ -1117,7 +1216,7 @@ public final class SwissEph implements AutoCloseable {
                 MemorySegment positions =
                         arena.allocate(JAVA_DOUBLE, ECLIPSE_GEOGRAPHIC_POSITION_COUNT);
                 MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.solarEclipseWhere(
                         julianDayUt, ephemerisFlags, positions, attributes, error);
                 String message = NativeStrings.readBuffer(error);
@@ -1131,23 +1230,30 @@ public final class SwissEph implements AutoCloseable {
         });
     }
 
-    /** Solar-eclipse circumstances for a moment and an observer position. */
-    public SolarEclipseAttributes solarEclipseHow(double julianDayUt, int ephemerisFlags,
-                                                  GeographicPosition observer) {
+    /**
+     * Solar-eclipse circumstances for a moment and an observer position.
+     *
+     * <p>A result whose {@code isEclipsed()} is false means no eclipse is visible
+     * from there. That is an answer, not a failure, which is why the native
+     * return value is reported rather than reduced to a success check.</p>
+     */
+    public SolarEclipseCircumstances solarEclipseHow(double julianDayUt, int ephemerisFlags,
+                                                     GeographicPosition observer) {
         Objects.requireNonNull(observer, "observer");
         Validation.julianDay(julianDayUt, "julianDayUt");
-        return call(bindings -> {
+        return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment geographicPosition = allocateObserver(arena, observer);
                 MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.solarEclipseHow(
                         julianDayUt, ephemerisFlags, geographicPosition, attributes, error);
+                String message = NativeStrings.readBuffer(error);
                 if (flags < 0) {
-                    throw new SwissEphException(
-                            "swe_sol_eclipse_how", flags, NativeStrings.readBuffer(error));
+                    throw new SwissEphException("swe_sol_eclipse_how", flags, message);
                 }
-                return new SolarEclipseAttributes(attributes.toArray(JAVA_DOUBLE));
+                return new SolarEclipseCircumstances(new EclipseFlags(flags),
+                        new SolarEclipseAttributes(attributes.toArray(JAVA_DOUBLE)), message);
             }
         });
     }
@@ -1157,11 +1263,11 @@ public final class SwissEph implements AutoCloseable {
                                                java.util.Collection<EclipseType> types,
                                                boolean backward) {
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
-        int typeMask = EclipseType.mask(Objects.requireNonNull(types, "types"));
+        int typeMask = EclipseType.mask(requireEclipseTypes(types, false));
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.lunarEclipseWhen(startJulianDayUt, ephemerisFlags, typeMask,
                         times, backward ? 1 : 0, error);
                 String message = NativeStrings.readBuffer(error);
@@ -1186,12 +1292,12 @@ public final class SwissEph implements AutoCloseable {
                                                    GeographicPosition observer, boolean backward) {
         Objects.requireNonNull(observer, "observer");
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
-        return call(bindings -> {
+        return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment geographicPosition = allocateObserver(arena, observer);
                 MemorySegment times = arena.allocate(JAVA_DOUBLE, ECLIPSE_TIME_COUNT);
                 MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.lunarEclipseWhenLocal(startJulianDayUt, ephemerisFlags,
                         geographicPosition, times, attributes, backward ? 1 : 0, error);
                 String message = NativeStrings.readBuffer(error);
@@ -1204,23 +1310,29 @@ public final class SwissEph implements AutoCloseable {
         });
     }
 
-    /** Lunar-eclipse circumstances for a moment and an observer position. */
-    public LunarEclipseAttributes lunarEclipseHow(double julianDayUt, int ephemerisFlags,
-                                                  GeographicPosition observer) {
+    /**
+     * Lunar-eclipse circumstances for a moment and an observer position.
+     *
+     * <p>A result whose {@code isEclipsed()} is false means no eclipse is under
+     * way. That is an answer, not a failure.</p>
+     */
+    public LunarEclipseCircumstances lunarEclipseHow(double julianDayUt, int ephemerisFlags,
+                                                     GeographicPosition observer) {
         Objects.requireNonNull(observer, "observer");
         Validation.julianDay(julianDayUt, "julianDayUt");
-        return call(bindings -> {
+        return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment geographicPosition = allocateObserver(arena, observer);
                 MemorySegment attributes = arena.allocate(JAVA_DOUBLE, ECLIPSE_ATTRIBUTE_COUNT);
-                MemorySegment error = arena.allocate(NativeBindings.AS_MAXCH);
+                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                 int flags = bindings.lunarEclipseHow(
                         julianDayUt, ephemerisFlags, geographicPosition, attributes, error);
+                String message = NativeStrings.readBuffer(error);
                 if (flags < 0) {
-                    throw new SwissEphException(
-                            "swe_lun_eclipse_how", flags, NativeStrings.readBuffer(error));
+                    throw new SwissEphException("swe_lun_eclipse_how", flags, message);
                 }
-                return new LunarEclipseAttributes(attributes.toArray(JAVA_DOUBLE));
+                return new LunarEclipseCircumstances(new EclipseFlags(flags),
+                        new LunarEclipseAttributes(attributes.toArray(JAVA_DOUBLE)), message);
             }
         });
     }
@@ -1237,6 +1349,14 @@ public final class SwissEph implements AutoCloseable {
     /** Variant taking an already combined native {@code roundflag} mask. */
     public DegreeParts splitDegrees(double degrees, int roundFlags) {
         Validation.finite(degrees, "degrees");
+        if ((roundFlags & DegreeSplitOption.ZODIACAL.value()) != 0
+                && (roundFlags & DegreeSplitOption.NAKSHATRA.value()) != 0) {
+            // The native code takes the nakshatra branch and returns before it
+            // ever looks at the zodiacal bit, so asking for both would leave the
+            // result claiming to be a division it is not.
+            throw new IllegalArgumentException(
+                    "ZODIACAL and NAKSHATRA divide the circle differently and cannot be combined");
+        }
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
                 MemorySegment degreePart = arena.allocate(JAVA_INT);
@@ -1266,6 +1386,42 @@ public final class SwissEph implements AutoCloseable {
         return context.call(task);
     }
 
+    /**
+     * Runs a task whose native routine calls {@code swe_set_topo()} behind our
+     * back, and leaves the observer as it found it.
+     *
+     * <p>{@code swe_sol_eclipse_how()}, {@code swe_lun_eclipse_how()}, the local
+     * eclipse searches and {@code swe_rise_trans()} all set the process-wide
+     * topocentric observer to the position they were handed. Without this, asking
+     * about an eclipse at one place would silently re-aim every later
+     * {@link CalculationFlag#TOPOCENTRIC} calculation at it, while
+     * {@link #settings()} went on reporting the old one.</p>
+     *
+     * <p>When an observer was configured it is put back. When none ever was,
+     * there is nothing to restore, so the snapshot records the position the
+     * library now holds instead of pretending it is still unset.</p>
+     *
+     * @param used the observer passed to the native routine
+     */
+    private <T> T callResettingObserver(GeographicPosition used,
+                                        NativeContext.NativeTask<T> task) {
+        ensureOpen();
+        return context.call(bindings -> {
+            SwissEphSettings before = context.settings();
+            GeographicPosition previous = before.topocentricObserver();
+            try {
+                return task.run(bindings);
+            } finally {
+                if (previous != null) {
+                    bindings.setTopocentricPosition(previous.longitude(), previous.latitude(),
+                            previous.altitudeMeters());
+                } else {
+                    context.settings(before.withTopocentricObserver(used));
+                }
+            }
+        });
+    }
+
     private void ensureOpen() {
         if (closed.get()) {
             throw new IllegalStateException("this SwissEph handle is closed");
@@ -1283,6 +1439,26 @@ public final class SwissEph implements AutoCloseable {
                 values.getAtIndex(JAVA_DOUBLE, 5),
                 new ReturnedFlags(returnedFlags),
                 message);
+    }
+
+    /**
+     * Rejects eclipse kinds the requested search can never produce.
+     *
+     * <p>Asking a solar search for a penumbral eclipse, or a lunar one for an
+     * annular eclipse, is not an error to the native code. It simply keeps
+     * searching for a candidate that cannot exist.</p>
+     */
+    private static java.util.Collection<EclipseType> requireEclipseTypes(
+            java.util.Collection<EclipseType> types, boolean solar) {
+        Objects.requireNonNull(types, "types");
+        for (EclipseType type : types) {
+            Objects.requireNonNull(type, "type");
+            if (solar ? !type.isSolar() : !type.isLunar()) {
+                throw new IllegalArgumentException(type + " cannot describe a "
+                        + (solar ? "solar" : "lunar") + " eclipse");
+            }
+        }
+        return types;
     }
 
     private static MemorySegment allocateObserver(Arena arena, GeographicPosition observer) {

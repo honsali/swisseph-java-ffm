@@ -175,10 +175,11 @@ class ValueObjectTest {
 
     @Test
     void ephemerisPositionExposesRetrogradeMotion() {
+        int withSpeed = CalculationFlag.SWISS_EPHEMERIS.value() | CalculationFlag.SPEED.value();
         EphemerisPosition direct = new EphemerisPosition(
-                10.0, 0.0, 1.0, 0.9, 0.0, 0.0, new ReturnedFlags(2), null);
+                10.0, 0.0, 1.0, 0.9, 0.0, 0.0, new ReturnedFlags(withSpeed), null);
         EphemerisPosition retrograde = new EphemerisPosition(
-                10.0, 0.0, 1.0, -0.3, 0.0, 0.0, new ReturnedFlags(2), "note");
+                10.0, 0.0, 1.0, -0.3, 0.0, 0.0, new ReturnedFlags(withSpeed), "note");
 
         assertFalse(direct.isRetrograde());
         assertTrue(retrograde.isRetrograde());
@@ -186,6 +187,67 @@ class ValueObjectTest {
         assertEquals("note", retrograde.warning());
         assertEquals(10.0, direct.longitude());
         assertEquals(0.9, direct.longitudeSpeed());
+    }
+
+    @Test
+    void retrogradeMotionRefusesToAnswerFromTheWrongNumber() {
+        // Without speed the components are all zero, so the honest answer is not
+        // "direct" but "you did not ask".
+        EphemerisPosition noSpeed = new EphemerisPosition(10.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+                new ReturnedFlags(CalculationFlag.SWISS_EPHEMERIS.value()), "");
+        assertThrows(IllegalStateException.class, noSpeed::isRetrograde);
+
+        // In cartesian output the first speed is dx/dt, and in equatorial output
+        // it is motion in right ascension. Neither says anything about being
+        // retrograde in ecliptic longitude.
+        EphemerisPosition cartesian = new EphemerisPosition(1.0, 0.0, 0.0, -0.5, 0.0, 0.0,
+                new ReturnedFlags(CalculationFlag.SPEED.value()
+                        | CalculationFlag.CARTESIAN.value()), "");
+        assertThrows(IllegalStateException.class, cartesian::isRetrograde);
+
+        EphemerisPosition equatorial = new EphemerisPosition(10.0, 0.0, 1.0, -0.5, 0.0, 0.0,
+                new ReturnedFlags(CalculationFlag.SPEED.value()
+                        | CalculationFlag.EQUATORIAL.value()), "");
+        assertThrows(IllegalStateException.class, equatorial::isRetrograde);
+    }
+
+    @Test
+    void sphericalCoordinatesRefuseTheWrongLabels() {
+        SphericalCoordinates ecliptic = new SphericalCoordinates(
+                120.0, 5.0, HorizontalCoordinateType.ECLIPTIC);
+        assertEquals(120.0, ecliptic.eclipticLongitude());
+        assertEquals(5.0, ecliptic.eclipticLatitude());
+        assertThrows(IllegalStateException.class, ecliptic::rightAscension);
+        assertThrows(IllegalStateException.class, ecliptic::declination);
+
+        SphericalCoordinates equatorial = new SphericalCoordinates(
+                120.0, 5.0, HorizontalCoordinateType.EQUATORIAL);
+        assertEquals(120.0, equatorial.rightAscension());
+        assertEquals(5.0, equatorial.declination());
+        assertThrows(IllegalStateException.class, equatorial::eclipticLongitude);
+    }
+
+    @Test
+    void eclipseCircumstancesReportAbsenceRatherThanFailing() {
+        SolarEclipseCircumstances none = new SolarEclipseCircumstances(
+                new EclipseFlags(0), new SolarEclipseAttributes(new double[20]), null);
+        assertFalse(none.isEclipsed(), "flags of zero mean no eclipse is visible");
+        assertEquals("", none.warning());
+
+        double[] attributes = new double[20];
+        attributes[0] = 1.02;
+        SolarEclipseCircumstances total = new SolarEclipseCircumstances(
+                new EclipseFlags(EclipseType.TOTAL.value()),
+                new SolarEclipseAttributes(attributes), "");
+        assertTrue(total.isEclipsed());
+        assertTrue(total.flags().has(EclipseType.TOTAL));
+        assertEquals(1.02, total.magnitude());
+
+        LunarEclipseCircumstances lunar = new LunarEclipseCircumstances(
+                new EclipseFlags(EclipseType.PENUMBRAL.value()),
+                new LunarEclipseAttributes(attributes), "");
+        assertTrue(lunar.isEclipsed());
+        assertEquals(1.02, lunar.umbralMagnitude());
     }
 
     @Test

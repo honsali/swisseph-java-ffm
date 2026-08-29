@@ -20,6 +20,7 @@ import java.util.concurrent.TimeUnit;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -319,6 +320,98 @@ class NativeLifecycleIntegrationTest {
     }
 
     @Test
+    @DisplayName("A local eclipse call leaves the topocentric observer where it found it")
+    void localCallsRestoreTheTopocentricObserver() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition configured = GeographicPosition.of(2.3522, 48.8566);
+            swe.setTopocentricObserver(configured);
+
+            EphemerisPosition before = swe.calculateUt(J2000, CelestialBody.MOON,
+                    CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.TOPOCENTRIC);
+
+            // swe_sol_eclipse_how(), the local searches and swe_rise_trans() all
+            // call swe_set_topo() themselves. Without restoration, this far-away
+            // observer would silently become the one every later topocentric
+            // calculation uses.
+            GeographicPosition elsewhere = GeographicPosition.of(-149.9003, -17.5516);
+            swe.solarEclipseHow(J2000, CalculationFlag.MOSHIER_EPHEMERIS.value(), elsewhere);
+            swe.lunarEclipseHow(J2000, CalculationFlag.MOSHIER_EPHEMERIS.value(), elsewhere);
+            swe.riseTransit(J2000, CelestialBody.SUN, elsewhere,
+                    AtmosphericConditions.STANDARD, RiseTransitFlag.RISE);
+
+            EphemerisPosition after = swe.calculateUt(J2000, CelestialBody.MOON,
+                    CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.TOPOCENTRIC);
+
+            assertEquals(before, after,
+                    "a local eclipse or rise call must not re-aim later topocentric work");
+            assertEquals(configured, swe.settings().topocentricObserverIfSet().orElseThrow());
+        }
+    }
+
+    @Test
+    @DisplayName("With no observer configured, settings() records the one the library kept")
+    void withoutAConfiguredObserverTheSnapshotStaysTruthful() {
+        try (SwissEph swe = NativeTestSupport.openWithoutData()) {
+            assertTrue(swe.settings().topocentricObserverIfSet().isEmpty());
+
+            GeographicPosition used = GeographicPosition.of(-149.9003, -17.5516);
+            swe.solarEclipseHow(J2000, CalculationFlag.MOSHIER_EPHEMERIS.value(), used);
+
+            // There is no way to un-set an observer in the C library, so the honest
+            // move is to report the one it now holds rather than keep claiming none.
+            assertEquals(used, swe.settings().topocentricObserverIfSet().orElseThrow());
+        }
+    }
+
+    @Test
+    @DisplayName("Sidereal and ayanamsha names refuse arguments that read out of bounds")
+    void siderealArgumentsAreBounded() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            // swe_get_ayanamsa_name() reduces with isidmode %= 256 and then checks
+            // only the upper bound, so -1 would index ayanamsa_name[-1].
+            assertThrows(IllegalArgumentException.class, () -> swe.ayanamsaName(-1));
+            assertThrows(IllegalArgumentException.class, () -> swe.ayanamsaName(Integer.MIN_VALUE));
+            assertThrows(IllegalArgumentException.class,
+                    () -> swe.setSiderealMode(-1, 0.0, 0.0));
+            // USER defines its ayanamsha from t0 and the offset, which the enum
+            // overload has no way to supply.
+            assertThrows(IllegalArgumentException.class,
+                    () -> swe.setSiderealMode(SiderealMode.USER));
+
+            // A mode above the table is simply unknown, not dangerous.
+            assertEquals("", swe.ayanamsaName(60));
+        }
+    }
+
+    @Test
+    @DisplayName("A long library path does not overflow the buffer we hand the library")
+    void libraryPathFitsInItsBuffer() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            // swe_get_library_path() writes its terminator at index AS_MAXCH, one
+            // past a 256-byte allocation. If the buffer were still that size this
+            // would corrupt the arena rather than return a string.
+            String path = swe.nativeLibraryPath();
+            assertNotNull(path);
+            assertTrue(path.length() <= 256, "unexpected length " + path.length());
+        }
+    }
+
+    @Test
+    @DisplayName("Sunshine house positions are refused rather than served from stale state")
+    void sunshineHousePositionsAreRefused() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            for (HouseSystem sunshine : new HouseSystem[] {
+                    HouseSystem.SUNSHINE_TREINDL, HouseSystem.SUNSHINE_MAKRANSKY }) {
+                // swe_house_pos() writes the ascmc[9] == 99 sentinel and the library
+                // then reuses a declination cached from an earlier, unrelated call.
+                assertThrows(IllegalArgumentException.class,
+                        () -> swe.housePosition(100.0, 48.0, 23.44, sunshine, 120.0, 0.0));
+            }
+            assertTrue(swe.housePosition(100.0, 48.0, 23.44, HouseSystem.PLACIDUS, 120.0, 0.0) > 0);
+        }
+    }
+
+    @Test
     @DisplayName("Star names are bounded before they reach the native buffer")
     void starNamesAreBounded() {
         try (SwissEph swe = NativeTestSupport.open()) {

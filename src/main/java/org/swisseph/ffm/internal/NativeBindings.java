@@ -25,6 +25,16 @@ import static java.lang.foreign.ValueLayout.JAVA_INT;
 public final class NativeBindings {
     /** {@code AS_MAXCH}: the buffer size Swiss Ephemeris assumes for every {@code char *serr}. */
     public static final int AS_MAXCH = 256;
+    /**
+     * Size to allocate for any {@code char *} buffer we hand to the library.
+     *
+     * <p>One byte more than {@code AS_MAXCH}, because the C code does not always
+     * keep the terminator inside it. {@code swe_get_library_path()} runs
+     * {@code strncpy(s, name, AS_MAXCH)} and then {@code s[AS_MAXCH] = 0}, and
+     * closes with {@code s[bytes] = 0} where {@code bytes} can itself reach
+     * {@code AS_MAXCH}. Both write the 257th byte of a 256-byte allocation.</p>
+     */
+    public static final int TEXT_BUFFER_SIZE = AS_MAXCH + 1;
     /** {@code SE_MAX_STNAME}: the longest fixed-star name accepted as input. */
     public static final int MAX_STAR_NAME = 256;
     /**

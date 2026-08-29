@@ -27,7 +27,14 @@ final class NativeTestSupport {
             return Optional.empty();
         }
         Path path = Path.of(configured).toAbsolutePath().normalize();
-        return Files.isRegularFile(path) ? Optional.of(path) : Optional.empty();
+        if (!Files.isRegularFile(path)) {
+            // Not the same thing as "no library configured". Treating a typo as
+            // an absence would skip the whole native suite and still report
+            // BUILD SUCCESS, which is exactly how untested bindings ship.
+            throw new IllegalStateException(
+                    LIBRARY_PROPERTY + " was set to " + path + ", which is not a file");
+        }
+        return Optional.of(path);
     }
 
     static Optional<Path> ephemerisDirectory() {
@@ -36,7 +43,11 @@ final class NativeTestSupport {
             return Optional.empty();
         }
         Path path = Path.of(configured).toAbsolutePath().normalize();
-        return Files.isDirectory(path) ? Optional.of(path) : Optional.empty();
+        if (!Files.isDirectory(path)) {
+            throw new IllegalStateException(
+                    EPHEMERIS_PROPERTY + " was set to " + path + ", which is not a directory");
+        }
+        return Optional.of(path);
     }
 
     /** Skips the calling test unless a native library was configured. */

@@ -56,8 +56,34 @@ public record EphemerisPosition(
         return thirdCoordinateSpeed;
     }
 
-    /** Returns whether the body is retrograde, that is moving backwards in longitude. */
+    /**
+     * Whether the body is retrograde, that is moving backwards in ecliptic
+     * longitude.
+     *
+     * <p>Only meaningful for polar ecliptic output with speed. In cartesian
+     * output the first speed is {@code dx/dt}, and in equatorial output it is
+     * the motion in right ascension; a negative value there says nothing about
+     * retrograde motion. Rather than answer from the wrong number, those cases
+     * are refused.</p>
+     *
+     * @throws IllegalStateException if speed was not requested, or if the
+     *                               coordinates are cartesian or equatorial
+     */
     public boolean isRetrograde() {
+        if (!returnedFlags.has(CalculationFlag.SPEED)
+                && !returnedFlags.has(CalculationFlag.SPEED_THREE_POINT)) {
+            throw new IllegalStateException(
+                    "speed was not requested, so the speed components are zero; "
+                            + "add CalculationFlag.SPEED to ask about retrograde motion");
+        }
+        if (returnedFlags.has(CalculationFlag.CARTESIAN)) {
+            throw new IllegalStateException("these are cartesian coordinates, so the first speed "
+                    + "is dx/dt rather than motion in longitude");
+        }
+        if (returnedFlags.has(CalculationFlag.EQUATORIAL)) {
+            throw new IllegalStateException("these are equatorial coordinates, so the first speed "
+                    + "is motion in right ascension rather than in ecliptic longitude");
+        }
         return firstCoordinateSpeed < 0.0;
     }
 }

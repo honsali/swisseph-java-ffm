@@ -56,17 +56,18 @@ public enum CelestialBody {
      * @param minorPlanetNumber the MPC number, for example 433 for Eros
      */
     public static int asteroid(int minorPlanetNumber) {
-        if (minorPlanetNumber <= 0) {
-            throw new IllegalArgumentException(
-                    "minorPlanetNumber must be positive, but was " + minorPlanetNumber);
+        if (minorPlanetNumber <= 0 || minorPlanetNumber > Integer.MAX_VALUE - ASTEROID_OFFSET) {
+            throw new IllegalArgumentException("minorPlanetNumber must be between 1 and "
+                    + (Integer.MAX_VALUE - ASTEROID_OFFSET) + ", but was " + minorPlanetNumber);
         }
         return ASTEROID_OFFSET + minorPlanetNumber;
     }
 
     /** Returns the {@code ipl} value for a planetary moon. */
     public static int planetaryMoon(int moonNumber) {
-        if (moonNumber <= 0) {
-            throw new IllegalArgumentException("moonNumber must be positive, but was " + moonNumber);
+        if (moonNumber <= 0 || moonNumber > Integer.MAX_VALUE - PLANETARY_MOON_OFFSET) {
+            throw new IllegalArgumentException("moonNumber must be between 1 and "
+                    + (Integer.MAX_VALUE - PLANETARY_MOON_OFFSET) + ", but was " + moonNumber);
         }
         return PLANETARY_MOON_OFFSET + moonNumber;
     }

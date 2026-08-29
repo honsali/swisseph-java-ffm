@@ -56,11 +56,13 @@ public final class NativeLibraryLocator {
     /** Returns the file names this platform is searched for, in order. */
     public static List<String> platformFileNames() {
         String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        if (os.contains("win")) {
-            return List.of("swe.dll", "swedll64.dll", "libswe.dll");
-        }
+        // macOS first: "darwin" contains "win", so testing for Windows ahead of it
+        // would hand .dll names to every JVM that reports os.name as Darwin.
         if (os.contains("mac") || os.contains("darwin")) {
             return List.of("libswe.dylib", "libswe.so");
+        }
+        if (os.contains("win")) {
+            return List.of("swe.dll", "swedll64.dll", "libswe.dll");
         }
         return List.of("libswe.so", "swe.so");
     }
