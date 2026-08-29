@@ -62,6 +62,15 @@ public final class NativeContext {
     private final NativeBindings bindings;
     private final String nativeVersion;
 
+    /**
+     * Serializes handing work to the native thread against tearing the context
+     * down. Held only while submitting, never while waiting for a result.
+     *
+     * <p>Lock order is {@link #REGISTRY_LOCK} then this one; nothing ever takes
+     * them the other way round.</p>
+     */
+    private final ReentrantLock submitLock = new ReentrantLock();
+
     /** Guarded by {@link #REGISTRY_LOCK}. */
     private int referenceCount;
     private volatile boolean closed;
@@ -167,20 +176,38 @@ public final class NativeContext {
      */
     public <T> T call(NativeTask<T> task) {
         Objects.requireNonNull(task, "task");
-        if (closed) {
-            throw new IllegalStateException(
-                    "Swiss Ephemeris native context for " + libraryPath + " is closed");
+        Future<T> future;
+        // Reading `closed` and queueing the work have to be one step. Checking
+        // first and submitting after is a time-of-check-to-time-of-use race with
+        // tearDown(): the check passes, the last handle is released, and the work
+        // is then queued behind swe_close() -- or worse, is still executing a
+        // downcall when arena.close() unloads the library, which is a crash and
+        // not an exception. Under this lock, any task that is accepted is
+        // guaranteed to sit ahead of swe_close() in the queue.
+        submitLock.lock();
+        try {
+            if (closed) {
+                throw new IllegalStateException(
+                        "Swiss Ephemeris native context for " + libraryPath + " is closed");
+            }
+            future = submit(executor, () -> task.run(bindings));
+        } finally {
+            submitLock.unlock();
         }
-        return runOn(executor, () -> task.run(bindings));
+        // Waiting happens outside the lock, so concurrent callers queue up on the
+        // native thread rather than on each other.
+        return await(future);
     }
 
-    private static <T> T runOn(ExecutorService executor, Callable<T> task) {
-        Future<T> future;
+    private static <T> Future<T> submit(ExecutorService executor, Callable<T> task) {
         try {
-            future = executor.submit(task);
+            return executor.submit(task);
         } catch (RejectedExecutionException rejected) {
             throw new IllegalStateException("Swiss Ephemeris native context is closed", rejected);
         }
+    }
+
+    private static <T> T await(Future<T> future) {
         try {
             return future.get();
         } catch (InterruptedException interrupted) {
@@ -191,6 +218,10 @@ public final class NativeContext {
         } catch (ExecutionException wrapped) {
             throw unwrap(wrapped);
         }
+    }
+
+    private static <T> T runOn(ExecutorService executor, Callable<T> task) {
+        return await(submit(executor, task));
     }
 
     /**
@@ -249,12 +280,23 @@ public final class NativeContext {
     }
 
     private void tearDown() {
-        closed = true;
+        Future<Void> closeTask;
+        submitLock.lock();
         try {
-            runOn(executor, () -> {
+            closed = true;
+            // Queued while no call() can slip in behind it. The executor is
+            // single-threaded and FIFO, so once this task has run, every call
+            // that was accepted before it has already finished -- which is what
+            // makes arena.close() below safe.
+            closeTask = submit(executor, () -> {
                 bindings.close();
                 return null;
             });
+        } finally {
+            submitLock.unlock();
+        }
+        try {
+            await(closeTask);
         } catch (RuntimeException failure) {
             // swe_close() only frees native buffers. Report it, but never let it
             // stop us from releasing the thread and the arena.

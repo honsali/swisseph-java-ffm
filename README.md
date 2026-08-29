@@ -223,11 +223,11 @@ and every `HouseSystem` must be recognised by `swe_house_name()`.
 ## Publishing
 
 ```text
-org.swisseph:swisseph-java-ffm:0.4.0
+org.swisseph:swisseph-java-ffm:0.5.0
 ```
 
 Published to this repository's GitHub Packages registry. Create a release
-tagged `v0.4.0`, or run the **Publish Maven package** workflow manually. Builds
+tagged `v0.5.0`, or run the **Publish Maven package** workflow manually. Builds
 are reproducible: bump `project.build.outputTimestamp` alongside the version.
 
 Note that consuming from GitHub Packages requires a GitHub token in the

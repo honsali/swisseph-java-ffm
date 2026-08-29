@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -360,6 +361,99 @@ class NativeLifecycleIntegrationTest {
             assertTrue(suppressed.stream().anyMatch(
                             message -> message != null && message.contains("dispatched from thread")),
                     "expected the caller's dispatch site to be attached, got " + suppressed);
+        }
+    }
+
+    @Test
+    @DisplayName("Closing waits for a native call that is already in flight")
+    void closingWaitsForCallsAlreadyInFlight() throws Exception {
+        Path library = NativeTestSupport.requireLibrary();
+        NativeContext context = NativeContext.acquire(library, version -> { });
+
+        CountDownLatch started = new CountDownLatch(1);
+        ExecutorService caller = Executors.newSingleThreadExecutor();
+        try {
+            Future<String> slow = caller.submit(() -> context.call(bindings -> {
+                started.countDown();
+                try {
+                    // Occupy the native thread long enough for the close below to
+                    // land in the middle of this call.
+                    Thread.sleep(750);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return "finished";
+            }));
+            assertTrue(started.await(30, TimeUnit.SECONDS), "the slow call never started");
+
+            // Releases the last handle, so this tears the context down. It must
+            // not unload the library from under the call still running on it.
+            context.release();
+
+            assertEquals("finished", slow.get(30, TimeUnit.SECONDS),
+                    "an in-flight call must complete rather than be torn out from under");
+            assertFalse(context.isOpen());
+        } finally {
+            caller.shutdownNow();
+            assertTrue(caller.awaitTermination(30, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    @DisplayName("Calls racing a close either succeed or fail cleanly, never crash")
+    void callsRacingACloseFailCleanly() throws Exception {
+        Path library = NativeTestSupport.requireLibrary();
+
+        // Repeated so the close lands at varying points relative to the callers.
+        for (int attempt = 0; attempt < 20; attempt++) {
+            NativeContext context = NativeContext.acquire(library, version -> { });
+            CountDownLatch release = new CountDownLatch(1);
+            List<Callable<Boolean>> callers = new ArrayList<>();
+            for (int worker = 0; worker < 8; worker++) {
+                callers.add(() -> {
+                    release.await();
+                    for (int round = 0; round < 25; round++) {
+                        try {
+                            String version = context.call(bindings -> {
+                                try (java.lang.foreign.Arena arena =
+                                             java.lang.foreign.Arena.ofConfined()) {
+                                    var buffer = arena.allocate(256);
+                                    bindings.version(buffer);
+                                    return buffer.getString(0);
+                                }
+                            });
+                            // A call that got through must have produced a real
+                            // answer, not garbage read out of freed memory.
+                            if (version == null || version.isBlank()) {
+                                return false;
+                            }
+                        } catch (IllegalStateException expected) {
+                            // The context closed underneath us. This is the only
+                            // failure mode a caller should ever observe.
+                            return true;
+                        }
+                    }
+                    return true;
+                });
+            }
+
+            ExecutorService workers = Executors.newFixedThreadPool(8);
+            try {
+                List<Future<Boolean>> results = new ArrayList<>();
+                for (Callable<Boolean> call : callers) {
+                    results.add(workers.submit(call));
+                }
+                release.countDown();
+                context.release();
+                for (Future<Boolean> result : results) {
+                    assertTrue(result.get(60, TimeUnit.SECONDS),
+                            "a caller racing the close saw something other than a clean refusal");
+                }
+            } finally {
+                workers.shutdownNow();
+                assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
+            }
+            assertFalse(context.isOpen());
         }
     }
 
