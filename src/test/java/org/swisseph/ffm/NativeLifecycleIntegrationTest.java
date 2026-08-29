@@ -412,6 +412,64 @@ class NativeLifecycleIntegrationTest {
     }
 
     @Test
+    @DisplayName("A failed local call still leaves Java and the library agreeing")
+    void aFailedLocalCallLeavesTheObserverConsistent() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition configured = GeographicPosition.of(2.3522, 48.8566);
+            swe.setTopocentricObserver(configured);
+
+            // The native routines check the altitude before they reach their own
+            // swe_set_topo(), so this is refused before anything moves.
+            assertThrows(IllegalArgumentException.class, () -> swe.solarEclipseHow(
+                    J2000, CalculationFlag.MOSHIER_EPHEMERIS.value(),
+                    new GeographicPosition(10.0, 40.0, 30_000.0)));
+
+            assertEquals(configured, swe.settings().topocentricObserverIfSet().orElseThrow(),
+                    "a refused call must not change what settings() reports");
+
+            EphemerisPosition topocentric = swe.calculateUt(J2000, CelestialBody.MOON,
+                    CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.TOPOCENTRIC);
+            assertTrue(topocentric.returnedFlags().has(CalculationFlag.TOPOCENTRIC));
+        }
+    }
+
+    @Test
+    @DisplayName("A twilight search accepts at most one definition of twilight")
+    void twilightOptionsAreExclusive() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition observer = GeographicPosition.of(2.3522, 48.8566);
+            double start = swe.julianDay(2000, 3, 20, 0.0, CalendarType.GREGORIAN);
+
+            // Upstream tests the three in a fixed order and takes the first, so a
+            // combination silently answers a different question.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    start, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.CIVIL_TWILIGHT,
+                    RiseTransitFlag.ASTRONOMICAL_TWILIGHT));
+
+            assertTrue(swe.riseTransit(start, CelestialBody.SUN, observer,
+                    AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.CIVIL_TWILIGHT).found());
+        }
+    }
+
+    @Test
+    @DisplayName("A library can be reopened straight after the last handle closed")
+    void aLibraryCanBeReopenedImmediately() {
+        Path library = NativeTestSupport.requireLibrary();
+
+        // Teardown now runs off the registry lock, with a per-path gate holding
+        // back only the acquires that target this same library.
+        try (SwissEph first = SwissEph.open(library)) {
+            assertEquals(1, first.handleCount());
+        }
+        try (SwissEph reopened = SwissEph.open(library)) {
+            assertEquals(1, reopened.handleCount());
+            assertFalse(reopened.version().isBlank());
+        }
+    }
+
+    @Test
     @DisplayName("Star names are bounded before they reach the native buffer")
     void starNamesAreBounded() {
         try (SwissEph swe = NativeTestSupport.open()) {

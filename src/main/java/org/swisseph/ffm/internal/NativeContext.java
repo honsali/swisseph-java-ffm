@@ -12,6 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,6 +54,19 @@ import java.util.function.Consumer;
 public final class NativeContext {
     private static final ReentrantLock REGISTRY_LOCK = new ReentrantLock();
     private static final Map<Path, NativeContext> REGISTRY = new HashMap<>();
+    /**
+     * Paths currently being loaded or torn down, each with a latch that opens
+     * when the work is finished.
+     *
+     * <p>This exists so neither operation has to run under
+     * {@link #REGISTRY_LOCK}. Holding the global lock across a native call would
+     * let one stuck downcall freeze every acquire and release in the process,
+     * including for unrelated libraries; dropping the lock without a gate would
+     * let a second context be loaded for a path whose {@code swe_close()} is
+     * still running, which on a build without thread-local state would wipe the
+     * new context's {@code swed}.</p>
+     */
+    private static final Map<Path, CountDownLatch> IN_FLIGHT = new HashMap<>();
     private static final AtomicInteger THREAD_COUNTER = new AtomicInteger();
     private static final long SHUTDOWN_TIMEOUT_SECONDS = 30L;
 
@@ -97,29 +111,89 @@ public final class NativeContext {
         Objects.requireNonNull(versionValidator, "versionValidator");
         Path key = canonicalize(libraryPath);
 
+        while (true) {
+            CountDownLatch busy;
+            REGISTRY_LOCK.lock();
+            try {
+                NativeContext existing = REGISTRY.get(key);
+                if (existing != null) {
+                    // Validate before handing out the handle, so a stricter caller
+                    // cannot silently inherit a build it would have rejected.
+                    versionValidator.accept(existing.nativeVersion);
+                    existing.referenceCount++;
+                    return existing;
+                }
+                busy = IN_FLIGHT.get(key);
+                if (busy == null) {
+                    // Claim the path, then do the slow work with the lock released.
+                    IN_FLIGHT.put(key, new CountDownLatch(1));
+                    break;
+                }
+            } finally {
+                REGISTRY_LOCK.unlock();
+            }
+            // Another thread is loading or closing this library. Wait for it off
+            // the lock, then look again.
+            awaitUninterruptibly(busy);
+        }
+
+        NativeContext created;
+        try {
+            created = load(key);
+        } catch (RuntimeException | Error failure) {
+            openGate(key);
+            throw failure;
+        }
+        try {
+            versionValidator.accept(created.nativeVersion);
+        } catch (RuntimeException | Error rejected) {
+            try {
+                created.tearDown();
+            } finally {
+                openGate(key);
+            }
+            throw rejected;
+        }
+
         REGISTRY_LOCK.lock();
         try {
-            NativeContext existing = REGISTRY.get(key);
-            if (existing != null) {
-                // Validate before handing out the handle, so a stricter caller
-                // cannot silently inherit a build it would have rejected.
-                versionValidator.accept(existing.nativeVersion);
-                existing.referenceCount++;
-                return existing;
-            }
-
-            NativeContext created = load(key);
-            try {
-                versionValidator.accept(created.nativeVersion);
-            } catch (RuntimeException | Error rejected) {
-                created.tearDown();
-                throw rejected;
-            }
             created.referenceCount = 1;
             REGISTRY.put(key, created);
-            return created;
         } finally {
             REGISTRY_LOCK.unlock();
+        }
+        openGate(key);
+        return created;
+    }
+
+    private static void openGate(Path key) {
+        CountDownLatch gate;
+        REGISTRY_LOCK.lock();
+        try {
+            gate = IN_FLIGHT.remove(key);
+        } finally {
+            REGISTRY_LOCK.unlock();
+        }
+        if (gate != null) {
+            gate.countDown();
+        }
+    }
+
+    private static void awaitUninterruptibly(CountDownLatch gate) {
+        boolean interrupted = false;
+        try {
+            while (true) {
+                try {
+                    gate.await();
+                    return;
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -149,22 +223,55 @@ public final class NativeContext {
             // The library is opened on the native thread too: on Windows the loader
             // runs DllMain there, and thread-local state must be initialised by the
             // same thread that will later use it.
-            NativeBindings bindings = runOn(executor, () -> {
+            //
+            // Uninterruptible, for the same reason the teardown is: giving up on
+            // the wait would drop us into the failure path below, which unloads
+            // the library while the call that is still running holds it.
+            NativeBindings bindings = awaitUninterruptibly(submit(executor, () -> {
                 SymbolLookup symbols = SymbolLookup.libraryLookup(libraryPath, arena);
                 return new NativeBindings(symbols);
-            });
-            String version = runOn(executor, () -> {
+            }));
+            String version = awaitUninterruptibly(submit(executor, () -> {
                 try (Arena call = Arena.ofConfined()) {
                     MemorySegment buffer = call.allocate(NativeBindings.TEXT_BUFFER_SIZE);
                     bindings.version(buffer);
                     return NativeStrings.readBuffer(buffer);
                 }
-            });
+            }));
             return new NativeContext(libraryPath, arena, executor, bindings, version);
         } catch (RuntimeException | Error failure) {
-            executor.shutdownNow();
-            arena.close();
+            // Never shutdownNow() here: interrupting a thread that is inside a
+            // downcall, then closing the arena, unloads the library beneath it.
+            shutdownAndCloseArena(executor, arena, libraryPath);
             throw failure;
+        }
+    }
+
+    /** Stops the native thread, waits for it to finish, and only then unloads. */
+    private static void shutdownAndCloseArena(ExecutorService executor, Arena arena, Path path) {
+        executor.shutdown();
+        boolean interrupted = false;
+        try {
+            boolean terminated = false;
+            while (!terminated) {
+                try {
+                    terminated = executor.awaitTermination(SHUTDOWN_TIMEOUT_SECONDS,
+                            TimeUnit.SECONDS);
+                    if (!terminated) {
+                        System.getLogger(NativeContext.class.getName()).log(
+                                System.Logger.Level.WARNING,
+                                "Swiss Ephemeris native thread for " + path
+                                        + " has not stopped; still waiting before unloading");
+                    }
+                } catch (InterruptedException ignored) {
+                    interrupted = true;
+                }
+            }
+        } finally {
+            arena.close();
+            if (interrupted) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -297,14 +404,17 @@ public final class NativeContext {
                 return;
             }
             REGISTRY.remove(libraryPath, this);
-            // Tear down while the registry lock is still held. Releasing it first
-            // would let another thread acquire() this same path, miss the entry we
-            // just removed, and load a second context while swe_close() is still
-            // running against the first. On a build where TLS expands to nothing
-            // that second context would then find its swed already wiped.
-            tearDown();
+            // Claim the path for the duration of the teardown. An acquire() that
+            // arrives now waits on this gate instead of loading a second context
+            // while swe_close() is still running against this one.
+            IN_FLIGHT.put(libraryPath, new CountDownLatch(1));
         } finally {
             REGISTRY_LOCK.unlock();
+        }
+        try {
+            tearDown();
+        } finally {
+            openGate(libraryPath);
         }
     }
 
@@ -332,35 +442,7 @@ public final class NativeContext {
             System.getLogger(NativeContext.class.getName())
                     .log(System.Logger.Level.WARNING, "swe_close() failed for " + libraryPath, failure);
         } finally {
-            executor.shutdown();
-            boolean interrupted = false;
-            boolean terminated = false;
-            try {
-                // The close task has already returned and nothing new can be
-                // queued, so this only waits for the thread itself to wind up.
-                // Never shutdownNow() here: interrupting a thread that is inside
-                // a downcall would let arena.close() unload the library beneath
-                // it, which is a crash rather than an exception.
-                while (!terminated) {
-                    try {
-                        terminated = executor.awaitTermination(
-                                SHUTDOWN_TIMEOUT_SECONDS, TimeUnit.SECONDS);
-                        if (!terminated) {
-                            System.getLogger(NativeContext.class.getName()).log(
-                                    System.Logger.Level.WARNING,
-                                    "Swiss Ephemeris native thread for " + libraryPath
-                                            + " has not stopped; still waiting before unloading");
-                        }
-                    } catch (InterruptedException ignored) {
-                        interrupted = true;
-                    }
-                }
-            } finally {
-                arena.close();
-                if (interrupted) {
-                    Thread.currentThread().interrupt();
-                }
-            }
+            shutdownAndCloseArena(executor, arena, libraryPath);
         }
     }
 

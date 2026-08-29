@@ -467,7 +467,17 @@ public final class SwissEph implements AutoCloseable {
     // Time
     // ------------------------------------------------------------------
 
-    /** Converts a civil date to a Julian day with {@code swe_julday()}. */
+    /**
+     * Converts a civil date to a Julian day with {@code swe_julday()}.
+     *
+     * <p>Out-of-range fields are normalised rather than rejected, because that is
+     * what {@code swe_julday()} does and this method exists to expose it: the
+     * 31st of February becomes the 2nd or 3rd of March, and an hour of 25 rolls
+     * into the next day. Code ported from C would change meaning if this
+     * validated instead. Use {@link #utcToJulianDay(UtcDateTime, CalendarType)}
+     * when you want impossible dates refused; {@link UtcDateTime} checks its
+     * fields.</p>
+     */
     public double julianDay(int year, int month, int day, double hour, CalendarType calendar) {
         Objects.requireNonNull(calendar, "calendar");
         Validation.finite(hour, "hour");
@@ -607,12 +617,11 @@ public final class SwissEph implements AutoCloseable {
     /** Variant of {@code swe_deltat_ex()} taking a raw ephemeris flag. */
     public double deltaT(double julianDay, int ephemerisFlags) {
         Validation.julianDay(julianDay, "julianDay");
-        return call(bindings -> {
-            try (Arena arena = Arena.ofConfined()) {
-                MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
-                return bindings.deltaTEx(julianDay, ephemerisFlags, error);
-            }
-        });
+        // serr is passed as NULL on purpose. The only thing swe_deltat_ex reports
+        // there is that no ephemeris path has been set, which a caller can read
+        // directly and earlier from settings() and currentFiles(); allocating a
+        // buffer only to drop its contents would suggest otherwise.
+        return call(bindings -> bindings.deltaTEx(julianDay, ephemerisFlags, MemorySegment.NULL));
     }
 
     /** Greenwich mean sidereal time in hours, from {@code swe_sidtime()}. */
@@ -1009,6 +1018,7 @@ public final class SwissEph implements AutoCloseable {
         Objects.requireNonNull(observer, "observer");
         Objects.requireNonNull(atmosphere, "atmosphere");
         Validation.julianDay(julianDayUt, "julianDayUt");
+        Validation.pressureModel(observer, atmosphere);
         Validation.degrees(firstCoordinate, "firstCoordinate");
         Validation.degrees(secondCoordinate, "secondCoordinate");
         Validation.finite(distance, "distance");
@@ -1099,6 +1109,11 @@ public final class SwissEph implements AutoCloseable {
                 atmosphere);
     }
 
+    /** The three mutually exclusive twilight options. */
+    private static final int TWILIGHT_MASK =
+            RiseTransitFlag.CIVIL_TWILIGHT.value() | RiseTransitFlag.NAUTICAL_TWILIGHT.value()
+                    | RiseTransitFlag.ASTRONOMICAL_TWILIGHT.value();
+
     /** The four {@code SE_CALC_*} event bits; the rest are options. */
     private static final int RISE_TRANSIT_EVENT_MASK =
             RiseTransitFlag.RISE.value() | RiseTransitFlag.SET.value()
@@ -1109,7 +1124,7 @@ public final class SwissEph implements AutoCloseable {
                                           int ephemerisFlags, int eventFlags,
                                           GeographicPosition observer,
                                           AtmosphericConditions atmosphere) {
-        Objects.requireNonNull(observer, "observer");
+        Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Objects.requireNonNull(atmosphere, "atmosphere");
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
         int events = eventFlags & RISE_TRANSIT_EVENT_MASK;
@@ -1119,6 +1134,14 @@ public final class SwissEph implements AutoCloseable {
             throw new IllegalArgumentException("one of RISE, SET, UPPER_MERIDIAN_TRANSIT or "
                     + "LOWER_MERIDIAN_TRANSIT must be requested");
         }
+        int twilight = eventFlags & TWILIGHT_MASK;
+        if (Integer.bitCount(twilight) > 1) {
+            // The native code checks them in a fixed order and uses the first it
+            // finds, so a combination quietly answers a different question.
+            throw new IllegalArgumentException("at most one of CIVIL_TWILIGHT, "
+                    + "NAUTICAL_TWILIGHT and ASTRONOMICAL_TWILIGHT may be requested");
+        }
+        Validation.pressureModel(observer, atmosphere);
         if (Integer.bitCount(events) > 1) {
             // Upstream resolves a combination by internal priority, so the caller
             // would get one of them without being told which.
@@ -1188,7 +1211,7 @@ public final class SwissEph implements AutoCloseable {
     /** Finds the next or previous solar eclipse visible from an observer position. */
     public LocalSolarEclipse solarEclipseWhenLocal(double startJulianDayUt, int ephemerisFlags,
                                                    GeographicPosition observer, boolean backward) {
-        Objects.requireNonNull(observer, "observer");
+        Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
         return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
@@ -1239,7 +1262,7 @@ public final class SwissEph implements AutoCloseable {
      */
     public SolarEclipseCircumstances solarEclipseHow(double julianDayUt, int ephemerisFlags,
                                                      GeographicPosition observer) {
-        Objects.requireNonNull(observer, "observer");
+        Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Validation.julianDay(julianDayUt, "julianDayUt");
         return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
@@ -1290,7 +1313,7 @@ public final class SwissEph implements AutoCloseable {
     /** Finds the next or previous lunar eclipse visible from an observer position. */
     public LocalLunarEclipse lunarEclipseWhenLocal(double startJulianDayUt, int ephemerisFlags,
                                                    GeographicPosition observer, boolean backward) {
-        Objects.requireNonNull(observer, "observer");
+        Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
         return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
@@ -1318,7 +1341,7 @@ public final class SwissEph implements AutoCloseable {
      */
     public LunarEclipseCircumstances lunarEclipseHow(double julianDayUt, int ephemerisFlags,
                                                      GeographicPosition observer) {
-        Objects.requireNonNull(observer, "observer");
+        Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Validation.julianDay(julianDayUt, "julianDayUt");
         return callResettingObserver(observer, bindings -> {
             try (Arena arena = Arena.ofConfined()) {
@@ -1412,11 +1435,16 @@ public final class SwissEph implements AutoCloseable {
             try {
                 return task.run(bindings);
             } finally {
-                if (previous != null) {
-                    bindings.setTopocentricPosition(previous.longitude(), previous.latitude(),
-                            previous.altitudeMeters());
-                } else {
-                    context.settings(before.withTopocentricObserver(used));
+                // Unconditionally, and on the failure path too: the native routines
+                // validate their arguments before calling swe_set_topo(), so on an
+                // error the observer may or may not have moved. Writing it here
+                // makes the native state and the snapshot agree either way, rather
+                // than leaving the answer to depend on where the call gave up.
+                GeographicPosition settled = previous != null ? previous : used;
+                bindings.setTopocentricPosition(settled.longitude(), settled.latitude(),
+                        settled.altitudeMeters());
+                if (previous == null) {
+                    context.settings(before.withTopocentricObserver(settled));
                 }
             }
         });

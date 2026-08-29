@@ -29,6 +29,47 @@ final class Validation {
     /** Highest atmospheric pressure accepted, in millibar. */
     static final double MAX_PRESSURE_MILLIBAR = 100_000.0;
 
+    /** {@code SEI_ECL_GEOALT_MIN}: the eclipse routines reject anything lower. */
+    static final double MIN_ECLIPSE_ALTITUDE_METERS = -500.0;
+    /** {@code SEI_ECL_GEOALT_MAX}: the eclipse routines reject anything higher. */
+    static final double MAX_ECLIPSE_ALTITUDE_METERS = 25_000.0;
+
+    /**
+     * Where the barometric model behind {@code atpress == 0} breaks down.
+     *
+     * <p>Swiss Ephemeris derives the pressure as
+     * {@code 1013.25 * pow(1 - 0.0065 * altitude / 288, 5.255)}. The base turns
+     * negative above {@code 288 / 0.0065}, and a negative base with a
+     * fractional exponent is {@code NaN}, which then flows silently into the
+     * refracted altitude.</p>
+     */
+    static final double MAX_DERIVED_PRESSURE_ALTITUDE_METERS = 288.0 / 0.0065;
+
+    /** Rejects an observer the eclipse routines would refuse. */
+    static GeographicPosition eclipseObserver(GeographicPosition observer) {
+        double altitude = observer.altitudeMeters();
+        if (altitude < MIN_ECLIPSE_ALTITUDE_METERS || altitude > MAX_ECLIPSE_ALTITUDE_METERS) {
+            throw new IllegalArgumentException("the eclipse routines accept altitudes between "
+                    + MIN_ECLIPSE_ALTITUDE_METERS + " and " + MAX_ECLIPSE_ALTITUDE_METERS
+                    + " metres, but was " + altitude);
+        }
+        return observer;
+    }
+
+    /**
+     * Rejects the pairing of a very high observer with a derived pressure, which
+     * the native barometric model turns into {@code NaN}.
+     */
+    static void pressureModel(GeographicPosition observer, AtmosphericConditions atmosphere) {
+        if (atmosphere.derivesPressureFromAltitude()
+                && observer.altitudeMeters() >= MAX_DERIVED_PRESSURE_ALTITUDE_METERS) {
+            throw new IllegalArgumentException("deriving the pressure from an altitude of "
+                    + observer.altitudeMeters() + " m is not possible: the native barometric "
+                    + "model returns NaN at or above " + MAX_DERIVED_PRESSURE_ALTITUDE_METERS
+                    + " m. Give an explicit pressure instead.");
+        }
+    }
+
     private Validation() {
     }
 

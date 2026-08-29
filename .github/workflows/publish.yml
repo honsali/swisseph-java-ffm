@@ -9,9 +9,13 @@ permissions:
   contents: read
   packages: write
 
+env:
+  SWISSEPH_TAG: v2.10.03
+  EPHEMERIS_COMMIT: 3fd0f956d73898b91cc4f67cf18b21af656d1342
+
 jobs:
-  # Nothing is published until the binding has been exercised against a real
-  # Swiss Ephemeris build on every supported platform.
+  # Gate: the binding has to work against a real Swiss Ephemeris build on every
+  # supported platform before anything is published.
   verify:
     name: Verify
     uses: ./.github/workflows/native-tests.yml
@@ -41,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           # A tag that disagrees with the POM publishes a version nobody asked
-          # for, and a Maven version is immutable once released.
+          # for, and a released Maven version is immutable.
           pom="$(mvn --batch-mode --no-transfer-progress -q \
             org.apache.maven.plugins:maven-help-plugin:3.5.1:evaluate \
             -Dexpression=project.version -DforceStdout)"
@@ -52,7 +56,59 @@ jobs:
           fi
           echo "Publishing version $pom for tag $GITHUB_REF_NAME"
 
-      - name: Build and publish package
-        run: mvn --batch-mode --no-transfer-progress clean deploy
+      # The deploy below runs the native suite itself, so the artifact that
+      # reaches the registry is produced by a build that executed those tests.
+      # Verifying in one job and rebuilding in another would publish bits that
+      # nothing had run against.
+      - name: Check out Swiss Ephemeris sources
+        uses: actions/checkout@v6
+        with:
+          repository: aloistr/swisseph
+          ref: ${{ env.SWISSEPH_TAG }}
+          path: swisseph-src
+
+      - name: Build the Swiss Ephemeris shared library
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native
+          cd swisseph-src
+          sources="swedate.c swehouse.c swejpl.c swemmoon.c swemplan.c sweph.c swephlib.c swecl.c swehel.c"
+          gcc -O2 -fPIC -shared -o ../native/libswe.so $sources -lm -ldl
+          ls -l ../native/libswe.so
+
+      - name: Download the Swiss Ephemeris data files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p native/ephe
+          base="https://raw.githubusercontent.com/aloistr/swisseph/${EPHEMERIS_COMMIT}/ephe"
+          for file in sepl_18.se1 semo_18.se1 sefstars.txt; do
+            curl --fail --silent --show-error --location \
+              --retry 3 --retry-delay 5 \
+              -o "native/ephe/$file" "$base/$file"
+          done
+
+      - name: Build, test, and publish package
+        run: |
+          set -euo pipefail
+          mvn --batch-mode --no-transfer-progress clean deploy \
+            "-Dswisseph.integration.library=$(pwd)/native/libswe.so" \
+            "-Dswisseph.integration.ephemeris=$(pwd)/native/ephe"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fail if the native tests were skipped
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Publishing behind a skipped suite is the failure this whole pipeline
+          # exists to prevent.
+          for report in target/surefire-reports/TEST-*IntegrationTest.xml; do
+            [ -e "$report" ] || { echo "::error::No integration test report found"; exit 1; }
+            if grep -q 'skipped="[1-9]' "$report"; then
+              echo "::error::Integration tests were skipped in $report"
+              exit 1
+            fi
+          done

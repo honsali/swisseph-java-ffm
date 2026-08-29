@@ -108,6 +108,66 @@ class ValidationTest {
     }
 
     @Test
+    void planetaryMoonIdentifiersCannotReachTheAsteroidRange() {
+        // The two offsets are only 1000 apart: planetaryMoon(1433) would be 10433,
+        // which is asteroid(433), Eros.
+        assertEquals(9_001, CelestialBody.planetaryMoon(1));
+        assertEquals(9_999, CelestialBody.planetaryMoon(999));
+        assertThrows(IllegalArgumentException.class, () -> CelestialBody.planetaryMoon(1000));
+        assertThrows(IllegalArgumentException.class, () -> CelestialBody.planetaryMoon(1433));
+        assertThrows(IllegalArgumentException.class,
+                () -> CelestialBody.planetaryMoon(Integer.MAX_VALUE));
+        assertThrows(IllegalArgumentException.class,
+                () -> CelestialBody.asteroid(Integer.MAX_VALUE));
+    }
+
+    @Test
+    void theBuilderAppliesTheSameSiderealRulesAsTheSetters() {
+        SwissEphConfig.Builder builder =
+                SwissEphConfig.builder().library(java.nio.file.Path.of("libswe.so"));
+
+        // open(config) pushes the settings itself, so a rule enforced only in the
+        // setter would be bypassed by the configuration path.
+        assertThrows(IllegalArgumentException.class,
+                () -> builder.siderealMode(SiderealMode.USER));
+        assertThrows(IllegalArgumentException.class,
+                () -> builder.siderealMode(-1, 0.0, 0.0));
+
+        assertEquals(SiderealMode.LAHIRI.value(),
+                builder.siderealMode(SiderealMode.LAHIRI).build().siderealMode().orElseThrow());
+        // USER is reachable through the raw form, which does take t0.
+        assertEquals(SiderealMode.USER.value(),
+                builder.siderealMode(SiderealMode.USER.value(), 2_451_545.0, 24.0)
+                        .build().siderealMode().orElseThrow());
+    }
+
+    @Test
+    void eclipseAltitudesAreBoundedTheWayTheNativeRoutinesBoundThem() {
+        assertEquals(-500.0,
+                Validation.eclipseObserver(new GeographicPosition(0, 0, -500.0)).altitudeMeters());
+        assertEquals(25_000.0,
+                Validation.eclipseObserver(new GeographicPosition(0, 0, 25_000.0)).altitudeMeters());
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.eclipseObserver(new GeographicPosition(0, 0, 25_001.0)));
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.eclipseObserver(new GeographicPosition(0, 0, -501.0)));
+    }
+
+    @Test
+    void aDerivedPressureIsRefusedWhereTheBarometricModelBreaks() {
+        // atpress == 0 makes the library compute 1013.25 * pow(1 - 0.0065*h/288, 5.255).
+        // The base goes negative above 288/0.0065, and pow() then returns NaN.
+        GeographicPosition tooHigh = new GeographicPosition(0, 0, 45_000.0);
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.pressureModel(tooHigh, AtmosphericConditions.FROM_ALTITUDE));
+
+        // An explicit pressure never touches that model, so the same altitude is fine.
+        Validation.pressureModel(tooHigh, AtmosphericConditions.STANDARD);
+        Validation.pressureModel(new GeographicPosition(0, 0, 8_848.0),
+                AtmosphericConditions.FROM_ALTITUDE);
+    }
+
+    @Test
     void configRejectsAnEmptySupportedVersionSet() {
         assertThrows(IllegalArgumentException.class,
                 () -> SwissEphConfig.builder().supportedVersions());

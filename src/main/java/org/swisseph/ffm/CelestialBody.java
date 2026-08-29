@@ -65,9 +65,14 @@ public enum CelestialBody {
 
     /** Returns the {@code ipl} value for a planetary moon. */
     public static int planetaryMoon(int moonNumber) {
-        if (moonNumber <= 0 || moonNumber > Integer.MAX_VALUE - PLANETARY_MOON_OFFSET) {
+        // The two ranges are only 1000 apart, so anything larger would collide:
+        // planetaryMoon(1433) and asteroid(433) are both 10433, which the library
+        // would read as the asteroid Eros.
+        if (moonNumber <= 0 || moonNumber > ASTEROID_OFFSET - PLANETARY_MOON_OFFSET - 1) {
             throw new IllegalArgumentException("moonNumber must be between 1 and "
-                    + (Integer.MAX_VALUE - PLANETARY_MOON_OFFSET) + ", but was " + moonNumber);
+                    + (ASTEROID_OFFSET - PLANETARY_MOON_OFFSET - 1)
+                    + ", above which the identifier would collide with the asteroid range, but was "
+                    + moonNumber);
         }
         return PLANETARY_MOON_OFFSET + moonNumber;
     }
