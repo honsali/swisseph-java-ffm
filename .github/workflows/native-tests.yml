@@ -141,7 +141,8 @@ jobs:
           ephemeris="$(cd native/ephe && pwd)"
           mvn --batch-mode --no-transfer-progress verify \
             "-Dswisseph.integration.library=$library" \
-            "-Dswisseph.integration.ephemeris=$ephemeris"
+            "-Dswisseph.integration.ephemeris=$ephemeris" \
+            -Dswisseph.integration.required=true
 
       - name: Fail if the native tests were skipped
         shell: bash

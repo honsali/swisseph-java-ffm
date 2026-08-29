@@ -45,6 +45,37 @@ final class Validation {
      */
     static final double MAX_DERIVED_PRESSURE_ALTITUDE_METERS = 288.0 / 0.0065;
 
+    /**
+     * Rejects a raw {@code sid_mode} the library would silently replace.
+     *
+     * <p>{@code swe_set_sid_mode()} clamps a negative value to zero and, for any
+     * base it does not define, falls back to Fagan/Bradley without saying so.
+     * The snapshot in {@code settings()} would go on reporting the value that
+     * was asked for.</p>
+     */
+    static int siderealMode(int mode) {
+        if (mode < 0) {
+            throw new IllegalArgumentException(
+                    "sidereal mode must not be negative, but was " + mode);
+        }
+        int base = mode & 0xFF;
+        int options = mode & ~0xFF;
+        if (SiderealMode.of(base).isEmpty()) {
+            throw new IllegalArgumentException("sidereal mode " + base
+                    + " is not one this library defines; upstream would silently substitute "
+                    + "Fagan/Bradley. See SiderealMode for the defined values.");
+        }
+        int knownOptions = 0;
+        for (SiderealOption option : SiderealOption.values()) {
+            knownOptions |= option.value();
+        }
+        if ((options & ~knownOptions) != 0) {
+            throw new IllegalArgumentException("sidereal mode carries unknown option bits 0x"
+                    + Integer.toHexString(options & ~knownOptions));
+        }
+        return mode;
+    }
+
     /** Rejects an observer the eclipse routines would refuse. */
     static GeographicPosition eclipseObserver(GeographicPosition observer) {
         double altitude = observer.altitudeMeters();
@@ -61,8 +92,10 @@ final class Validation {
      * the native barometric model turns into {@code NaN}.
      */
     static void pressureModel(GeographicPosition observer, AtmosphericConditions atmosphere) {
+        // Strictly above: at exactly the limit the base is zero and pow() is
+        // still finite.
         if (atmosphere.derivesPressureFromAltitude()
-                && observer.altitudeMeters() >= MAX_DERIVED_PRESSURE_ALTITUDE_METERS) {
+                && observer.altitudeMeters() > MAX_DERIVED_PRESSURE_ALTITUDE_METERS) {
             throw new IllegalArgumentException("deriving the pressure from an altitude of "
                     + observer.altitudeMeters() + " m is not possible: the native barometric "
                     + "model returns NaN at or above " + MAX_DERIVED_PRESSURE_ALTITUDE_METERS

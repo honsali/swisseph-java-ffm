@@ -70,6 +70,7 @@ public final class NativeBindings {
     private final MethodHandle sweJdetToUtc;
     private final MethodHandle sweJdut1ToUtc;
     private final MethodHandle sweUtcTimeZone;
+    private final MethodHandle sweDeltat;
     private final MethodHandle sweDeltatEx;
     private final MethodHandle sweSidtime;
     private final MethodHandle sweHousesEx;
@@ -133,6 +134,8 @@ public final class NativeBindings {
         sweUtcTimeZone = bind(symbols, "swe_utc_time_zone", FunctionDescriptor.ofVoid(
                 JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT, JAVA_DOUBLE, JAVA_DOUBLE,
                 ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS, ADDRESS));
+        sweDeltat = bind(symbols, "swe_deltat", FunctionDescriptor.of(
+                JAVA_DOUBLE, JAVA_DOUBLE));
         sweDeltatEx = bind(symbols, "swe_deltat_ex", FunctionDescriptor.of(
                 JAVA_DOUBLE, JAVA_DOUBLE, JAVA_INT, ADDRESS));
         sweSidtime = bind(symbols, "swe_sidtime", FunctionDescriptor.of(JAVA_DOUBLE, JAVA_DOUBLE));
@@ -349,6 +352,18 @@ public final class NativeBindings {
                     yearOut, monthOut, dayOut, hourOut, minuteOut, secondOut);
         } catch (Throwable throwable) {
             throw fail("swe_utc_time_zone", throwable);
+        }
+    }
+
+    /**
+     * {@code swe_deltat()}, which derives the ephemeris flag itself through
+     * {@code swi_guess_ephe_flag()} rather than taking one.
+     */
+    public double deltaT(double julianDay) {
+        try {
+            return (double) sweDeltat.invokeExact(julianDay);
+        } catch (Throwable throwable) {
+            throw fail("swe_deltat", throwable);
         }
     }
 

@@ -390,12 +390,7 @@ public final class SwissEph implements AutoCloseable {
      * @param ayanamsaAtT0 ayanamsha at {@code t0}, for {@link SiderealMode#USER}
      */
     public void setSiderealMode(int mode, double t0, double ayanamsaAtT0) {
-        if (mode < 0) {
-            // Upstream folds a negative mode back to Fagan/Bradley, but the value
-            // recorded in settings() would keep saying something else.
-            throw new IllegalArgumentException(
-                    "sidereal mode must not be negative, but was " + mode);
-        }
+        Validation.siderealMode(mode);
         Validation.finite(t0, "t0");
         Validation.finite(ayanamsaAtT0, "ayanamsaAtT0");
         call(bindings -> {
@@ -604,9 +599,21 @@ public final class SwissEph implements AutoCloseable {
         });
     }
 
-    /** Returns ET minus UT in days, using the ephemeris currently in force. */
+    /**
+     * Returns ET minus UT in days, using the ephemeris currently in force.
+     *
+     * <p>Calls {@code swe_deltat()} rather than {@code swe_deltat_ex()} with a
+     * flag of zero. The two are not the same: {@code swe_deltat()} asks
+     * {@code swi_guess_ephe_flag()} which ephemeris is actually open and derives
+     * the tidal acceleration from that file's DE number, while a flag of zero
+     * falls back to the built-in constants. The difference is silent and grows
+     * with distance from the present -- around 0.3 s in 1800 and 11 s in the
+     * year 1000 against a DE441 file -- so the promise in the first line only
+     * holds with the guessing form.</p>
+     */
     public double deltaT(double julianDay) {
-        return deltaT(julianDay, 0);
+        Validation.julianDay(julianDay, "julianDay");
+        return call(bindings -> bindings.deltaT(julianDay));
     }
 
     /** Returns ET minus UT in days as computed for a specific ephemeris. */
@@ -1134,12 +1141,45 @@ public final class SwissEph implements AutoCloseable {
             throw new IllegalArgumentException("one of RISE, SET, UPPER_MERIDIAN_TRANSIT or "
                     + "LOWER_MERIDIAN_TRANSIT must be requested");
         }
+        boolean isTransit = (events & (RiseTransitFlag.UPPER_MERIDIAN_TRANSIT.value()
+                | RiseTransitFlag.LOWER_MERIDIAN_TRANSIT.value())) != 0;
+        if (isTransit
+                && (eventFlags & RiseTransitFlag.GEOCENTRIC_NO_ECLIPTIC_LATITUDE.value()) != 0) {
+            // That bit sends swe_rise_trans_true_hor() down the branch that skips
+            // its own swe_set_topo(), and the transit path then computes with
+            // SEFLG_TOPOCTR anyway. The observer it would use is whatever the
+            // library happens to hold, not the one passed here.
+            throw new IllegalArgumentException("GEOCENTRIC_NO_ECLIPTIC_LATITUDE cannot be used "
+                    + "with a meridian transit: the native code would compute topocentrically "
+                    + "against whatever observer was last configured, not this one");
+        }
         int twilight = eventFlags & TWILIGHT_MASK;
         if (Integer.bitCount(twilight) > 1) {
             // The native code checks them in a fixed order and uses the first it
             // finds, so a combination quietly answers a different question.
             throw new IllegalArgumentException("at most one of CIVIL_TWILIGHT, "
                     + "NAUTICAL_TWILIGHT and ASTRONOMICAL_TWILIGHT may be requested");
+        }
+        if (twilight != 0) {
+            // The twilight block sits behind an ipl == SE_SUN test and after the
+            // transit branch has already returned, so anything else is accepted
+            // and then quietly ignored.
+            if (bodyId != CelestialBody.SUN.id() || starName != null) {
+                throw new IllegalArgumentException(
+                        "twilight is only defined for the Sun; the native code ignores it "
+                                + "for any other body");
+            }
+            if (isTransit) {
+                throw new IllegalArgumentException(
+                        "twilight applies to rise and set, not to a meridian transit");
+            }
+        }
+        if ((eventFlags & RiseTransitFlag.DISC_CENTER.value()) != 0
+                && (eventFlags & RiseTransitFlag.DISC_BOTTOM.value()) != 0) {
+            // Upstream tests for the centre first and never reaches the other.
+            throw new IllegalArgumentException(
+                    "DISC_CENTER and DISC_BOTTOM describe different reference points "
+                            + "and cannot be combined");
         }
         Validation.pressureModel(observer, atmosphere);
         if (Integer.bitCount(events) > 1) {

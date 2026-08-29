@@ -246,7 +246,7 @@ class ValueObjectTest {
         LunarEclipseCircumstances lunar = new LunarEclipseCircumstances(
                 new EclipseFlags(EclipseType.PENUMBRAL.value()),
                 new LunarEclipseAttributes(attributes), "");
-        assertTrue(lunar.isEclipsed());
+        assertTrue(lunar.isVisible());
         assertEquals(1.02, lunar.umbralMagnitude());
     }
 

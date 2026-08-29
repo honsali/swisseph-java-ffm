@@ -133,8 +133,18 @@ public final class NativeContext {
                 REGISTRY_LOCK.unlock();
             }
             // Another thread is loading or closing this library. Wait for it off
-            // the lock, then look again.
-            awaitUninterruptibly(busy);
+            // the lock, then look again. Interruptible on purpose: unlike the
+            // teardown, nothing native is in our hands here, so a caller that
+            // gives up costs nothing and must not be pinned behind someone
+            // else's stuck downcall.
+            try {
+                busy.await();
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new SwissEphException(
+                        "Interrupted while waiting for another thread to finish with "
+                                + key, interrupted);
+            }
         }
 
         NativeContext created;
@@ -176,24 +186,6 @@ public final class NativeContext {
         }
         if (gate != null) {
             gate.countDown();
-        }
-    }
-
-    private static void awaitUninterruptibly(CountDownLatch gate) {
-        boolean interrupted = false;
-        try {
-            while (true) {
-                try {
-                    gate.await();
-                    return;
-                } catch (InterruptedException ignored) {
-                    interrupted = true;
-                }
-            }
-        } finally {
-            if (interrupted) {
-                Thread.currentThread().interrupt();
-            }
         }
     }
 

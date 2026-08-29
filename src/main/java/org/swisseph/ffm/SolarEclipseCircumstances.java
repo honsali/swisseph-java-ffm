@@ -8,8 +8,12 @@ import java.util.Objects;
  *
  * <p>The native return value is part of the answer, not just an error code: it
  * is {@code 0} when no eclipse is visible there, and otherwise carries the
- * eclipse type and visibility bits. Reporting only the attributes would leave a
- * caller unable to tell "no eclipse" from "an eclipse of magnitude zero".</p>
+ * eclipse type. Reporting only the attributes would leave a caller unable to
+ * tell "no eclipse" from "an eclipse of magnitude zero".</p>
+ *
+ * <p>{@code swe_sol_eclipse_how()} reports type bits only. The
+ * {@link EclipseVisibility} bits come from the local <em>search</em> functions,
+ * not from this one.</p>
  */
 public record SolarEclipseCircumstances(
         EclipseFlags flags,

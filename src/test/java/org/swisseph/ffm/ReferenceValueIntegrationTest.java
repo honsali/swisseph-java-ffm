@@ -486,7 +486,7 @@ class ReferenceValueIntegrationTest {
                     greatestEclipse, ephemerisFlag().value(),
                     GeographicPosition.of(-77.0369, 38.9072));
 
-            assertTrue(circumstances.isEclipsed());
+            assertTrue(circumstances.isVisible(), "the Moon was above the horizon at Washington");
             assertTrue(circumstances.flags().has(EclipseType.TOTAL));
             assertTrue(circumstances.umbralMagnitude() > 1.0,
                     "a total lunar eclipse has umbral magnitude above 1, was "
@@ -717,7 +717,7 @@ class ReferenceValueIntegrationTest {
     }
 
     @Test
-    @DisplayName("A fixed star rises, and later than the Sun does in June")
+    @DisplayName("A fixed star rises and then transits, in that order")
     void fixedStarsRiseAndSet() {
         NativeTestSupport.requireFixedStarCatalogue();
         try (SwissEph swe = NativeTestSupport.open()) {

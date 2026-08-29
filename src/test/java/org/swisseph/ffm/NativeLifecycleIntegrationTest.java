@@ -470,6 +470,134 @@ class NativeLifecycleIntegrationTest {
     }
 
     @Test
+    @DisplayName("A native failure still leaves Java and the library agreeing on the observer")
+    void aNativeFailureLeavesTheObserverConsistent() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition configured = GeographicPosition.of(2.3522, 48.8566);
+            swe.setTopocentricObserver(configured);
+
+            // An unknown star makes swe_rise_trans() fail inside the call, after
+            // the observer argument itself has passed every Java-side check. That
+            // is the path where the restoration in the finally block matters.
+            assertThrows(SwissEphException.class, () -> swe.riseTransit(J2000,
+                    "NoSuchStarExistsAnywhere", CalculationFlag.MOSHIER_EPHEMERIS.value(),
+                    RiseTransitFlag.RISE.value(), GeographicPosition.of(-149.9003, -17.5516),
+                    AtmosphericConditions.STANDARD));
+
+            assertEquals(configured, swe.settings().topocentricObserverIfSet().orElseThrow());
+
+            // And the library agrees, not just the snapshot: a topocentric
+            // position computed now must match one computed before the failure.
+            EphemerisPosition moon = swe.calculateUt(J2000, CelestialBody.MOON,
+                    CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.TOPOCENTRIC);
+            swe.setTopocentricObserver(configured);
+            EphemerisPosition again = swe.calculateUt(J2000, CelestialBody.MOON,
+                    CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.TOPOCENTRIC);
+            assertEquals(again, moon);
+        }
+    }
+
+    @Test
+    @DisplayName("A transit refuses the option that would skip its own swe_set_topo()")
+    void transitsRefuseTheGeocentricOption() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition observer = GeographicPosition.of(2.3522, 48.8566);
+
+            // The bit sends the native code down the branch that never calls
+            // swe_set_topo(), yet calc_mer_trans() then forces SEFLG_TOPOCTR.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    J2000, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.UPPER_MERIDIAN_TRANSIT,
+                    RiseTransitFlag.GEOCENTRIC_NO_ECLIPTIC_LATITUDE));
+
+            // It stays legal for a rise, which is the case it was designed for.
+            assertTrue(swe.riseTransit(J2000, CelestialBody.SUN, observer,
+                    AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE,
+                    RiseTransitFlag.GEOCENTRIC_NO_ECLIPTIC_LATITUDE).found());
+        }
+    }
+
+    @Test
+    @DisplayName("Twilight is refused where the native code would ignore it")
+    void twilightIsRefusedWhereItIsIgnored() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition observer = GeographicPosition.of(2.3522, 48.8566);
+
+            // The twilight block is guarded by ipl == SE_SUN and sits after the
+            // transit branch has already returned.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    J2000, CelestialBody.MOON, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.CIVIL_TWILIGHT));
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    J2000, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.UPPER_MERIDIAN_TRANSIT, RiseTransitFlag.CIVIL_TWILIGHT));
+
+            // Upstream checks the disc centre first and never reaches the bottom.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                    J2000, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.DISC_CENTER,
+                    RiseTransitFlag.DISC_BOTTOM));
+        }
+    }
+
+    @Test
+    @DisplayName("Delta T without a flag reproduces the ephemeris the library has open")
+    void deltaTWithoutAFlagMatchesTheOpenEphemeris() {
+        NativeTestSupport.requireEphemerisDirectory();
+        try (SwissEph swe = NativeTestSupport.open()) {
+            // Force the Swiss files open so swi_guess_ephe_flag() has something
+            // to find, then compare against the explicit form.
+            swe.calculateUt(J2000, CelestialBody.MOON, CalculationFlag.SWISS_EPHEMERIS);
+
+            for (double julianDay : new double[] { J2000, 2_378_497.0, 2_086_308.0 }) {
+                assertEquals(swe.deltaT(julianDay, Ephemeris.SWISS), swe.deltaT(julianDay), 1.0e-12,
+                        "swe_deltat() derives the ephemeris itself; a flag of zero does not, "
+                                + "and the two diverge for old dates at jd " + julianDay);
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("An acquire during a teardown waits and then gets a fresh context")
+    void acquireDuringTeardownWaitsForIt() throws Exception {
+        Path library = NativeTestSupport.requireLibrary();
+        NativeContext closing = NativeContext.acquire(library, version -> { });
+
+        CountDownLatch inCall = new CountDownLatch(1);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> slow = workers.submit(() -> closing.call(bindings -> {
+                inCall.countDown();
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertTrue(inCall.await(30, TimeUnit.SECONDS));
+
+            Future<String> reopening = workers.submit(() -> {
+                try (SwissEph fresh = SwissEph.open(library)) {
+                    return fresh.version();
+                }
+            });
+
+            closing.release();
+            slow.get(30, TimeUnit.SECONDS);
+
+            // The waiter must come back with a working context, not with the one
+            // that was being closed.
+            assertFalse(reopening.get(60, TimeUnit.SECONDS).isBlank());
+            assertFalse(closing.isOpen());
+        } finally {
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
     @DisplayName("Star names are bounded before they reach the native buffer")
     void starNamesAreBounded() {
         try (SwissEph swe = NativeTestSupport.open()) {

@@ -17,6 +17,28 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 final class NativeTestSupport {
     static final String LIBRARY_PROPERTY = "swisseph.integration.library";
     static final String EPHEMERIS_PROPERTY = "swisseph.integration.ephemeris";
+    /**
+     * Set by any build that must not ship untested bits.
+     *
+     * <p>With this on, a missing library or data directory fails the test rather
+     * than skipping it. That is what keeps the release pipeline honest: checking
+     * the surefire reports after {@code mvn deploy} would find a skipped suite
+     * only once the immutable artifacts were already published.</p>
+     */
+    static final String REQUIRED_PROPERTY = "swisseph.integration.required";
+
+    private static boolean nativeTestsAreRequired() {
+        return Boolean.getBoolean(REQUIRED_PROPERTY);
+    }
+
+    /** Skips, or fails when the build declared the native suite mandatory. */
+    private static void skipOrFail(String reason) {
+        if (nativeTestsAreRequired()) {
+            throw new IllegalStateException(reason + " (-D" + REQUIRED_PROPERTY
+                    + " is set, so this must not be skipped)");
+        }
+        assumeTrue(false, reason);
+    }
 
     private NativeTestSupport() {
     }
@@ -53,24 +75,27 @@ final class NativeTestSupport {
     /** Skips the calling test unless a native library was configured. */
     static Path requireLibrary() {
         Optional<Path> library = library();
-        assumeTrue(library.isPresent(),
-                () -> "Set -D" + LIBRARY_PROPERTY + "=<native-library> to run the native tests");
+        if (library.isEmpty()) {
+            skipOrFail("Set -D" + LIBRARY_PROPERTY + "=<native-library> to run the native tests");
+        }
         return library.orElseThrow();
     }
 
     /** Skips the calling test unless the Swiss Ephemeris data files were configured. */
     static Path requireEphemerisDirectory() {
         Optional<Path> directory = ephemerisDirectory();
-        assumeTrue(directory.isPresent(),
-                () -> "Set -D" + EPHEMERIS_PROPERTY + "=<ephe-directory> to run this test");
+        if (directory.isEmpty()) {
+            skipOrFail("Set -D" + EPHEMERIS_PROPERTY + "=<ephe-directory> to run this test");
+        }
         return directory.orElseThrow();
     }
 
     /** Skips unless the fixed-star catalogue is available. */
     static Path requireFixedStarCatalogue() {
         Path directory = requireEphemerisDirectory();
-        assumeTrue(Files.isRegularFile(directory.resolve("sefstars.txt")),
-                () -> "sefstars.txt is missing from " + directory);
+        if (!Files.isRegularFile(directory.resolve("sefstars.txt"))) {
+            skipOrFail("sefstars.txt is missing from " + directory);
+        }
         return directory;
     }
 

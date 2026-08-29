@@ -142,6 +142,43 @@ class ValidationTest {
     }
 
     @Test
+    void undefinedSiderealBasesAreRejected() {
+        // swe_set_sid_mode() substitutes Fagan/Bradley for any base it does not
+        // define, without saying so, while settings() would keep reporting the
+        // value that was asked for.
+        assertEquals(SiderealMode.LAHIRI.value(),
+                Validation.siderealMode(SiderealMode.LAHIRI.value()));
+        assertEquals(SiderealMode.LAHIRI_ICRC.value(),
+                Validation.siderealMode(SiderealMode.LAHIRI_ICRC.value()));
+        assertEquals(SiderealMode.USER.value(), Validation.siderealMode(SiderealMode.USER.value()));
+
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(47));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(254));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(-1));
+
+        // Known option bits ride along; unknown ones do not.
+        assertEquals(SiderealMode.LAHIRI.value() | SiderealOption.ECLIPTIC_OF_DATE.value(),
+                Validation.siderealMode(
+                        SiderealMode.LAHIRI.value() | SiderealOption.ECLIPTIC_OF_DATE.value()));
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.siderealMode(SiderealMode.LAHIRI.value() | (1 << 20)));
+    }
+
+    @Test
+    void theDerivedPressureLimitIsExclusive() {
+        // At exactly 288/0.0065 the base is zero and pow() returns zero, which is
+        // finite. Only strictly above does the model produce NaN.
+        GeographicPosition atLimit = new GeographicPosition(
+                0, 0, Validation.MAX_DERIVED_PRESSURE_ALTITUDE_METERS);
+        Validation.pressureModel(atLimit, AtmosphericConditions.FROM_ALTITUDE);
+
+        GeographicPosition past = new GeographicPosition(
+                0, 0, Math.nextUp(Validation.MAX_DERIVED_PRESSURE_ALTITUDE_METERS));
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.pressureModel(past, AtmosphericConditions.FROM_ALTITUDE));
+    }
+
+    @Test
     void eclipseAltitudesAreBoundedTheWayTheNativeRoutinesBoundThem() {
         assertEquals(-500.0,
                 Validation.eclipseObserver(new GeographicPosition(0, 0, -500.0)).altitudeMeters());

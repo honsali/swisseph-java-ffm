@@ -39,6 +39,10 @@ jobs:
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
 
+      # Only a release carries a tag to compare against. A manual
+      # workflow_dispatch run deliberately skips this check: it is the escape
+      # hatch for re-publishing after an infrastructure failure, and the person
+      # triggering it has already chosen the ref.
       - name: Check the release tag matches the POM version
         if: github.event_name == 'release'
         shell: bash
@@ -94,7 +98,8 @@ jobs:
           set -euo pipefail
           mvn --batch-mode --no-transfer-progress clean deploy \
             "-Dswisseph.integration.library=$(pwd)/native/libswe.so" \
-            "-Dswisseph.integration.ephemeris=$(pwd)/native/ephe"
+            "-Dswisseph.integration.ephemeris=$(pwd)/native/ephe" \
+            -Dswisseph.integration.required=true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -103,8 +108,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Publishing behind a skipped suite is the failure this whole pipeline
-          # exists to prevent.
+          # Belt and braces. The deploy above runs with
+          # -Dswisseph.integration.required=true, which turns a would-be skip
+          # into a test failure during the test phase, so this can no longer be
+          # the first thing to notice -- which matters, because a Maven version
+          # is immutable once deployed.
           for report in target/surefire-reports/TEST-*IntegrationTest.xml; do
             [ -e "$report" ] || { echo "::error::No integration test report found"; exit 1; }
             if grep -q 'skipped="[1-9]' "$report"; then
