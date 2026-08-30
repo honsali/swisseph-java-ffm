@@ -849,6 +849,9 @@ class ReferenceValueIntegrationTest {
                         RiseTransitResult viaAlias = swe.riseTransit(J2000, alias,
                                 swiss, mask, observer, AtmosphericConditions.STANDARD);
 
+                        assertTrue(viaConstant.found(),
+                                constant + " should rise and set from Paris, so a comparison "
+                                        + "of two absent events cannot stand in for one");
                         assertEquals(viaConstant.found(), viaAlias.found());
                         assertEquals(viaConstant.julianDayUt(), viaAlias.julianDayUt(), 0.0,
                                 constant + " via alias disagreed for " + event
@@ -860,38 +863,49 @@ class ReferenceValueIntegrationTest {
     }
 
     @Test
-    @DisplayName("An asteroid alias gives the same answer from a cold context")
-    void asteroidAliasesDoNotDependOnNativeHistory() {
+    @DisplayName("An aliased asteroid rises with its constant, in any context")
+    void anAliasedAsteroidRisesWithItsConstant() {
         NativeTestSupport.requireEphemerisDirectory();
-        double fromFreshContext;
-        // A context of its own, so swed.ast_diam has never been written.
+        GeographicPosition paris = GeographicPosition.of(2.3522, 48.8566);
+        int swiss = CalculationFlag.SWISS_EPHEMERIS.value();
+
+        // What this does prove: the answer is the same across independent native
+        // contexts, and the same whether the alias or the constant is asked for.
+        //
+        // What it does not prove, deliberately: that a *stale* swed.ast_diam
+        // cannot leak in. That field is written only while reading an individual
+        // asteroid file under SEI_FILE_ANY_AST, and the build supplies no such
+        // file -- Ceres through Vesta come from the main asteroid file, which
+        // never touches it. Any "warm versus cold" comparison here would be
+        // comparing zero against zero and would have passed before the fix too.
+        // The guard that actually holds the correction in place is the equality
+        // with the constant, above and below.
+        double fromOneContext;
         try (SwissEph swe = NativeTestSupport.open()) {
-            fromFreshContext = swe.riseTransit(J2000, CelestialBody.asteroid(1),
-                    CalculationFlag.SWISS_EPHEMERIS.value(), RiseTransitFlag.RISE.value(),
-                    GeographicPosition.of(2.3522, 48.8566),
-                    AtmosphericConditions.STANDARD).julianDayUt();
+            RiseTransitResult rise = swe.riseTransit(J2000, CelestialBody.asteroid(1),
+                    swiss, RiseTransitFlag.RISE.value(), paris, AtmosphericConditions.STANDARD);
+            assertTrue(rise.found(), "Ceres rises from Paris");
+            fromOneContext = rise.julianDayUt();
         }
 
         try (SwissEph swe = NativeTestSupport.open()) {
-            // Warm the context with other work first. Before the alias was
-            // resolved, the diameter for Ceres came from a field that only an
-            // individual asteroid file ever fills, so the answer could depend on
-            // whatever had been calculated before.
+            // Other work first, so this context is not in the same state as the one
+            // above even if it cannot change swed.ast_diam.
             swe.calculateUt(J2000, CelestialBody.VESTA, CalculationFlag.SWISS_EPHEMERIS);
             swe.riseTransit(J2000, CelestialBody.MOON, GeographicPosition.of(0.0, 0.0),
                     AtmosphericConditions.STANDARD, RiseTransitFlag.RISE);
 
-            double fromWarmContext = swe.riseTransit(J2000, CelestialBody.asteroid(1),
-                    CalculationFlag.SWISS_EPHEMERIS.value(), RiseTransitFlag.RISE.value(),
-                    GeographicPosition.of(2.3522, 48.8566),
-                    AtmosphericConditions.STANDARD).julianDayUt();
+            RiseTransitResult viaAlias = swe.riseTransit(J2000, CelestialBody.asteroid(1),
+                    swiss, RiseTransitFlag.RISE.value(), paris, AtmosphericConditions.STANDARD);
+            RiseTransitResult viaConstant = swe.riseTransit(J2000, CelestialBody.CERES,
+                    paris, AtmosphericConditions.STANDARD, RiseTransitFlag.RISE);
 
-            assertEquals(fromFreshContext, fromWarmContext, 0.0,
-                    "the rise of an aliased asteroid must not depend on native history");
-            assertEquals(fromFreshContext, swe.riseTransit(J2000, CelestialBody.CERES,
-                            GeographicPosition.of(2.3522, 48.8566),
-                            AtmosphericConditions.STANDARD, RiseTransitFlag.RISE).julianDayUt(),
-                    0.0, "and it must equal the answer for Ceres itself");
+            assertTrue(viaAlias.found());
+            assertTrue(viaConstant.found());
+            assertEquals(fromOneContext, viaAlias.julianDayUt(), 0.0,
+                    "the same request in another context must give the same answer");
+            assertEquals(viaConstant.julianDayUt(), viaAlias.julianDayUt(), 0.0,
+                    "and the alias must agree with the constant it duplicates");
         }
     }
 

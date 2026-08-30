@@ -60,7 +60,7 @@ jobs:
         uses: actions/cache@v6
         with:
           path: native
-          key: native-${{ matrix.os }}-${{ inputs.swisseph-tag }}-${{ inputs.ephemeris-commit }}-v2
+          key: native-${{ matrix.os }}-${{ runner.arch }}-${{ inputs.swisseph-tag }}-${{ inputs.ephemeris-commit }}-v2
 
       - name: Check out Swiss Ephemeris sources
         if: steps.native-cache.outputs.cache-hit != 'true'
