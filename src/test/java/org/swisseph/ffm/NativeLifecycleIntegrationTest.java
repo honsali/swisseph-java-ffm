@@ -624,6 +624,9 @@ class NativeLifecycleIntegrationTest {
                     seen.set(thrown);
                 }
             }, "gate-waiter");
+            // Daemon: a native load that hung after the gate opened would
+            // otherwise hold the Maven fork open past every join.
+            waiter.setDaemon(true);
             waiter.start();
 
             // Not "it has not finished yet", which would also be true of a thread
@@ -690,6 +693,7 @@ class NativeLifecycleIntegrationTest {
                     interruptFlagRestored.set(Thread.currentThread().isInterrupted());
                 }
             }, "interrupted-waiter");
+            waiter.setDaemon(true);
             waiter.start();
 
             // Interrupt only once it is demonstrably parked, so the test cannot
@@ -735,7 +739,7 @@ class NativeLifecycleIntegrationTest {
         }
     }
 
-    /** Spins until the teardown has been committed and the per-path gate is up. */
+    /** Waits until the teardown has been committed and the per-path gate is up. */
     private static void awaitUntilClosed(NativeContext context) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (context.isOpen() && System.nanoTime() < deadline) {

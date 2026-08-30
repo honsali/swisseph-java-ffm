@@ -816,6 +816,85 @@ class ReferenceValueIntegrationTest {
         }
     }
 
+    @Test
+    @DisplayName("The asteroid aliases behave exactly like the constants they duplicate")
+    void asteroidAliasesMatchTheirConstants() {
+        NativeTestSupport.requireEphemerisDirectory();
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition observer = GeographicPosition.of(2.3522, 48.8566);
+            int swiss = CalculationFlag.SWISS_EPHEMERIS.value();
+            CelestialBody[] constants = {
+                    CelestialBody.CERES, CelestialBody.PALLAS,
+                    CelestialBody.JUNO, CelestialBody.VESTA };
+
+            for (int number = 1; number <= 4; number++) {
+                CelestialBody constant = constants[number - 1];
+                int alias = CelestialBody.asteroid(number);
+
+                // The positions agree because swe_calc() remaps the alias itself.
+                assertEquals(swe.calculateUt(J2000, constant.id(), swiss),
+                        swe.calculateUt(J2000, alias, swiss),
+                        constant + " and its alias must be the same body");
+
+                // The rise and set times have to agree too, which they only do
+                // once the alias is resolved before the native call: otherwise
+                // the disc diameter comes from swed.ast_diam instead of pla_diam.
+                for (RiseTransitFlag event : new RiseTransitFlag[] {
+                        RiseTransitFlag.RISE, RiseTransitFlag.SET }) {
+                    for (RiseTransitFlag[] discOptions : new RiseTransitFlag[][] {
+                            {}, { RiseTransitFlag.DISC_CENTER }, { RiseTransitFlag.DISC_BOTTOM } }) {
+                        int mask = RiseTransitFlag.mask(event) | RiseTransitFlag.mask(discOptions);
+                        RiseTransitResult viaConstant = swe.riseTransit(J2000, constant.id(),
+                                swiss, mask, observer, AtmosphericConditions.STANDARD);
+                        RiseTransitResult viaAlias = swe.riseTransit(J2000, alias,
+                                swiss, mask, observer, AtmosphericConditions.STANDARD);
+
+                        assertEquals(viaConstant.found(), viaAlias.found());
+                        assertEquals(viaConstant.julianDayUt(), viaAlias.julianDayUt(), 0.0,
+                                constant + " via alias disagreed for " + event
+                                        + " with " + java.util.Arrays.toString(discOptions));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
+    @DisplayName("An asteroid alias gives the same answer from a cold context")
+    void asteroidAliasesDoNotDependOnNativeHistory() {
+        NativeTestSupport.requireEphemerisDirectory();
+        double fromFreshContext;
+        // A context of its own, so swed.ast_diam has never been written.
+        try (SwissEph swe = NativeTestSupport.open()) {
+            fromFreshContext = swe.riseTransit(J2000, CelestialBody.asteroid(1),
+                    CalculationFlag.SWISS_EPHEMERIS.value(), RiseTransitFlag.RISE.value(),
+                    GeographicPosition.of(2.3522, 48.8566),
+                    AtmosphericConditions.STANDARD).julianDayUt();
+        }
+
+        try (SwissEph swe = NativeTestSupport.open()) {
+            // Warm the context with other work first. Before the alias was
+            // resolved, the diameter for Ceres came from a field that only an
+            // individual asteroid file ever fills, so the answer could depend on
+            // whatever had been calculated before.
+            swe.calculateUt(J2000, CelestialBody.VESTA, CalculationFlag.SWISS_EPHEMERIS);
+            swe.riseTransit(J2000, CelestialBody.MOON, GeographicPosition.of(0.0, 0.0),
+                    AtmosphericConditions.STANDARD, RiseTransitFlag.RISE);
+
+            double fromWarmContext = swe.riseTransit(J2000, CelestialBody.asteroid(1),
+                    CalculationFlag.SWISS_EPHEMERIS.value(), RiseTransitFlag.RISE.value(),
+                    GeographicPosition.of(2.3522, 48.8566),
+                    AtmosphericConditions.STANDARD).julianDayUt();
+
+            assertEquals(fromFreshContext, fromWarmContext, 0.0,
+                    "the rise of an aliased asteroid must not depend on native history");
+            assertEquals(fromFreshContext, swe.riseTransit(J2000, CelestialBody.CERES,
+                            GeographicPosition.of(2.3522, 48.8566),
+                            AtmosphericConditions.STANDARD, RiseTransitFlag.RISE).julianDayUt(),
+                    0.0, "and it must equal the answer for Ceres itself");
+        }
+    }
+
     /** Prefers the real data files when the build supplied them, Moshier otherwise. */
     private static CalculationFlag ephemerisFlag() {
         return NativeTestSupport.ephemerisDirectory().isPresent()

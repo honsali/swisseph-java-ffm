@@ -57,10 +57,10 @@ jobs:
 
       - name: Cache the native library and ephemeris data
         id: native-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: native
-          key: native-${{ matrix.os }}-${{ inputs.swisseph-tag }}-${{ inputs.ephemeris-commit }}-v1
+          key: native-${{ matrix.os }}-${{ inputs.swisseph-tag }}-${{ inputs.ephemeris-commit }}-v2
 
       - name: Check out Swiss Ephemeris sources
         if: steps.native-cache.outputs.cache-hit != 'true'
@@ -126,7 +126,7 @@ jobs:
           base="https://raw.githubusercontent.com/aloistr/swisseph/${{ inputs.ephemeris-commit }}/ephe"
           # sepl_18 and semo_18 cover 1800-2399, which spans every date the
           # reference tests use. sefstars.txt is the fixed-star catalogue.
-          for file in sepl_18.se1 semo_18.se1 sefstars.txt; do
+          for file in sepl_18.se1 semo_18.se1 seas_18.se1 sefstars.txt; do
             curl --fail --silent --show-error --location \
               --retry 3 --retry-delay 5 \
               -o "native/ephe/$file" "$base/$file"
@@ -164,7 +164,7 @@ jobs:
 
       - name: Upload test reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: surefire-reports-${{ matrix.os }}
           path: target/surefire-reports/

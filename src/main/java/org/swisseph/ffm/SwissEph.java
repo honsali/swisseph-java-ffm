@@ -1182,9 +1182,9 @@ public final class SwissEph implements AutoCloseable {
                                           int ephemerisFlags, int eventFlags,
                                           GeographicPosition observer,
                                           AtmosphericConditions atmosphere) {
-        if (starName == null) {
-            Validation.riseTransitTarget(bodyId);
-        }
+        // Canonical from here on: the disc checks and the native call must both
+        // see the identifier the library will actually resolve the body from.
+        int target = starName == null ? Validation.riseTransitTarget(bodyId) : bodyId;
         Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Objects.requireNonNull(atmosphere, "atmosphere");
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
@@ -1226,7 +1226,7 @@ public final class SwissEph implements AutoCloseable {
             // The twilight block sits behind an ipl == SE_SUN test and after the
             // transit branch has already returned, so anything else is accepted
             // and then quietly ignored.
-            if (bodyId != CelestialBody.SUN.id() || starName != null) {
+            if (target != CelestialBody.SUN.id() || starName != null) {
                 throw new IllegalArgumentException(
                         "twilight is only defined for the Sun; the native code ignores it "
                                 + "for any other body");
@@ -1236,7 +1236,7 @@ public final class SwissEph implements AutoCloseable {
                         "twilight applies to rise and set, not to a meridian transit");
             }
         }
-        validateDiscOptions(bodyId, starName, eventFlags, twilight != 0);
+        validateDiscOptions(target, starName, eventFlags, twilight != 0);
         if ((eventFlags & RiseTransitFlag.DISC_CENTER.value()) != 0
                 && (eventFlags & RiseTransitFlag.DISC_BOTTOM.value()) != 0) {
             // Upstream tests for the centre first and never reaches the other.
@@ -1260,7 +1260,7 @@ public final class SwissEph implements AutoCloseable {
                 MemorySegment geographicPosition = allocateObserver(arena, observer);
                 MemorySegment result = arena.allocate(JAVA_DOUBLE, RISE_TRANSIT_VALUE_COUNT);
                 MemorySegment error = arena.allocate(NativeBindings.TEXT_BUFFER_SIZE);
-                int code = bindings.riseTransit(startJulianDayUt, bodyId, star, ephemerisFlags,
+                int code = bindings.riseTransit(startJulianDayUt, target, star, ephemerisFlags,
                         eventFlags, geographicPosition, atmosphere.pressureMillibar(),
                         atmosphere.temperatureCelsius(), result, error);
                 String message = NativeStrings.readBuffer(error);

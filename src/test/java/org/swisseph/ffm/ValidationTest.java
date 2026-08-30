@@ -287,6 +287,42 @@ class ValidationTest {
     }
 
     @Test
+    void theFourAsteroidAliasesResolveOntoTheirConstants() {
+        // SE_AST_OFFSET + 1..4 name the same bodies as SE_CERES..SE_VESTA.
+        assertEquals(CelestialBody.CERES.id(),
+                Validation.canonicalBodyId(CelestialBody.asteroid(1)));
+        assertEquals(CelestialBody.PALLAS.id(),
+                Validation.canonicalBodyId(CelestialBody.asteroid(2)));
+        assertEquals(CelestialBody.JUNO.id(),
+                Validation.canonicalBodyId(CelestialBody.asteroid(3)));
+        assertEquals(CelestialBody.VESTA.id(),
+                Validation.canonicalBodyId(CelestialBody.asteroid(4)));
+
+        // The fifth is a real individual asteroid and stays as it is.
+        assertEquals(CelestialBody.asteroid(5),
+                Validation.canonicalBodyId(CelestialBody.asteroid(5)));
+        assertEquals(CelestialBody.asteroid(433),
+                Validation.canonicalBodyId(CelestialBody.asteroid(433)));
+        assertEquals(CelestialBody.SUN.id(),
+                Validation.canonicalBodyId(CelestialBody.SUN.id()));
+    }
+
+    @Test
+    void aRiseTargetIsReturnedInItsCanonicalForm() {
+        // The returned value is the one that must reach swe_rise_trans():
+        // otherwise the alias takes the "ipl > SE_AST_OFFSET" branch and reads
+        // its diameter from swed.ast_diam, which no remapped calculation fills.
+        assertEquals(CelestialBody.CERES.id(),
+                Validation.riseTransitTarget(CelestialBody.asteroid(1)));
+        assertEquals(CelestialBody.VESTA.id(),
+                Validation.riseTransitTarget(CelestialBody.asteroid(4)));
+
+        // And the canonical form is what the disc table is then consulted with.
+        assertTrue(Validation.hasNativeDisc(
+                Validation.canonicalBodyId(CelestialBody.asteroid(1))));
+    }
+
+    @Test
     void theDiscTableDecidesWhichTargetsHaveOne() {
         // Straight off pla_diam: Sun through Pluto, then four zeros for the nodes
         // and apogees, then the Earth, then Chiron through Vesta.

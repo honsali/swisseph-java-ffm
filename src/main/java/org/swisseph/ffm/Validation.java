@@ -158,19 +158,50 @@ final class Validation {
     }
 
     /**
-     * Rejects a target that cannot rise, set, or transit.
+     * Checks a rise, set, or transit target and returns the identifier to use.
      *
      * <p>{@code swe_calc()} answers a geocentric request for the Earth by
      * zeroing all 24 values and reporting success, so the distance is zero and
      * the rise calculation divides by it. Nothing fails; the times just come
      * back meaningless.</p>
+     *
+     * <p>The returned value is {@linkplain #canonicalBodyId canonical} and must
+     * be the one passed on to the native call.</p>
      */
     static int riseTransitTarget(int bodyId) {
         safeBodyIdentifier(bodyId, "a rise, set or transit search");
-        if (bodyId == CelestialBody.EARTH.id()) {
+        int canonical = canonicalBodyId(bodyId);
+        if (canonical == CelestialBody.EARTH.id()) {
             throw new IllegalArgumentException("the Earth cannot rise or set from the Earth; "
                     + "swe_calc() returns a zero vector for it geocentrically, which the rise "
                     + "calculation then divides by");
+        }
+        return canonical;
+    }
+
+    /**
+     * Resolves the four asteroid aliases onto the constants they duplicate.
+     *
+     * <p>{@code SE_AST_OFFSET + 1..4} name Ceres, Pallas, Juno and Vesta, which
+     * are also {@code SE_CERES..SE_VESTA}. {@code swe_calc()} treats them as
+     * equivalent, but only by rewriting its own local {@code ipl};
+     * {@code swe_rise_trans_true_hor()} keeps whatever it was handed, and an
+     * alias then takes the {@code ipl > SE_AST_OFFSET} branch and reads its
+     * diameter from {@code swed.ast_diam}. That field is filled only while
+     * parsing an individual asteroid file, which the remapped calculation never
+     * opens: it is zero on a cold context and stale after some other asteroid
+     * has been computed. Passing the canonical identifier instead puts the body
+     * back on {@code pla_diam} and takes the native history out of the answer.
+     * </p>
+     *
+     * <p>The effect on a rise time is small, since these bodies subtend well
+     * under an arcsecond. The point is that it should not depend on what was
+     * calculated before.</p>
+     */
+    static int canonicalBodyId(int bodyId) {
+        int alias = bodyId - CelestialBody.ASTEROID_OFFSET;
+        if (alias >= 1 && alias <= 4) {
+            return CelestialBody.CERES.id() + alias - 1;
         }
         return bodyId;
     }

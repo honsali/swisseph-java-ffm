@@ -80,14 +80,15 @@ gcc -O2 -shared -o swe.dll $SOURCES -lm
 ```
 
 Data files come from the upstream `ephe` directory. `sepl_18.se1` and
-`semo_18.se1` cover 1800–2399 and are enough for most applications;
+`semo_18.se1` cover the planets and the Moon for 1800–2399 and are enough for
+most applications; `seas_18.se1` adds Ceres, Pallas, Juno and Vesta, and
 `sefstars.txt` is the fixed-star catalogue.
 
 ```bash
 # Pinned to the same commit the CI uses, so the data cannot shift underfoot.
 base=https://raw.githubusercontent.com/aloistr/swisseph/3fd0f956d73898b91cc4f67cf18b21af656d1342/ephe
 mkdir -p ephe && cd ephe
-for f in sepl_18.se1 semo_18.se1 sefstars.txt; do curl -fLO "$base/$f"; done
+for f in sepl_18.se1 semo_18.se1 seas_18.se1 sefstars.txt; do curl -fLO "$base/$f"; done
 ```
 
 ## Finding the library at runtime
