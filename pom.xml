@@ -4,7 +4,15 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>org.swisseph</groupId>
+    <!--
+      io.github.honsali rather than org.swisseph: a Maven groupId has to be a
+      namespace you can prove you own, and org.swisseph would mean the
+      swisseph.org domain. This one is verifiable through the GitHub account,
+      so the coordinates stay valid if this is ever published to Maven Central.
+      It is unrelated to the Java package and module names, which stay
+      org.swisseph.ffm because that is what the code binds to.
+    -->
+    <groupId>io.github.honsali</groupId>
     <artifactId>swisseph-java-ffm</artifactId>
     <version>1.0.0</version>
     <packaging>jar</packaging>

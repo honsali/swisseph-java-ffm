@@ -235,18 +235,64 @@ release may change results without changing this API. And
 `org.swisseph.ffm.internal` is not exported: it is an implementation detail and
 moves freely.
 
-## Publishing
+## Using it in a build
 
 ```text
-org.swisseph:swisseph-java-ffm:1.0.0
+io.github.honsali:swisseph-java-ffm:1.0.0
 ```
 
-Published to this repository's GitHub Packages registry. Create a release
-tagged `v1.0.0`, or run the **Publish Maven package** workflow manually. Builds
-are reproducible: bump `project.build.outputTimestamp` alongside the version.
+The groupId is `io.github.honsali`, not `org.swisseph`. A Maven groupId is a
+namespace you have to be able to prove you own, and `org.swisseph` would mean
+the `swisseph.org` domain. This one is verifiable through the GitHub account,
+so the coordinates hold if the artifact ever moves to Maven Central. It has
+nothing to do with the Java package and module names, which stay
+`org.swisseph.ffm` because that is what the code binds to.
 
-Note that consuming from GitHub Packages requires a GitHub token in the
-consumer's `settings.xml`, even for a public artifact.
+Releases go to this repository's GitHub Packages registry, which asks every
+consumer to authenticate even for a public artifact. So alongside the
+dependency:
+
+```xml
+<repositories>
+  <repository>
+    <id>github-swisseph-java-ffm</id>
+    <url>https://maven.pkg.github.com/honsali/swisseph-java-ffm</url>
+  </repository>
+</repositories>
+
+<dependencies>
+  <dependency>
+    <groupId>io.github.honsali</groupId>
+    <artifactId>swisseph-java-ffm</artifactId>
+    <version>1.0.0</version>
+  </dependency>
+</dependencies>
+```
+
+and in `~/.m2/settings.xml`, a GitHub username with a personal access token
+carrying the `read:packages` scope:
+
+```xml
+<servers>
+  <server>
+    <id>github-swisseph-java-ffm</id>
+    <username>YOUR_GITHUB_USERNAME</username>
+    <password>YOUR_TOKEN</password>
+  </server>
+</servers>
+```
+
+The `<id>` values have to match.
+
+## Publishing
+
+Create a release tagged `v1.0.0`, or run the **Publish Maven package**
+workflow manually. The workflow builds Swiss Ephemeris, runs the whole suite
+against it on all three platforms, checks the tag against the POM version, and
+only then deploys, from the same job that ran the tests.
+
+Builds are reproducible: bump `project.build.outputTimestamp` alongside the
+version. A released Maven version is immutable, so it cannot be republished.
 
 ## License
 
