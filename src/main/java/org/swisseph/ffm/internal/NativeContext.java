@@ -270,10 +270,10 @@ public final class NativeContext {
     /**
      * Runs {@code task} on the native thread and returns its result.
      *
-     * <p>A task must never take {@link #REGISTRY_LOCK}. It is no longer held
-     * across the teardown, but {@link #release()} does run {@code swe_close()} on
-     * this same thread, so a task that waited on the registry would deadlock
-     * against the close it is holding up.</p>
+     * <p>A task must never call back into {@link #call} or {@link #release} on
+     * this context. There is only one native thread, so work submitted from
+     * inside a task waits for a thread that is already busy running it, and the
+     * final {@code release()} would queue {@code swe_close()} behind itself.</p>
      */
     public <T> T call(NativeTask<T> task) {
         Objects.requireNonNull(task, "task");

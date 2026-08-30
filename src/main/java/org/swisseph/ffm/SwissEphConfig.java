@@ -212,6 +212,7 @@ public final class SwissEphConfig {
             // into the library itself, so a rule enforced only there would be
             // bypassed by the configuration path.
             this.siderealMode = Validation.siderealMode(mode);
+            Validation.siderealReference(mode, t0, ayanamsaAtT0);
             this.siderealT0 = Validation.finite(t0, "t0");
             this.siderealAyanamsaAtT0 = Validation.finite(ayanamsaAtT0, "ayanamsaAtT0");
             return this;

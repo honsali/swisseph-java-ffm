@@ -213,6 +213,68 @@ class ValidationTest {
     }
 
     @Test
+    void allThreeSiderealProjectionsAreMutuallyExclusive() {
+        // The native code tests ECL_T0, then SSY_PLANE, and only reads ECL_DATE
+        // in the last branch, so any pair silently keeps the first.
+        int lahiri = SiderealMode.LAHIRI.value();
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                lahiri | SiderealOption.ECLIPTIC_AT_T0.value()
+                        | SiderealOption.ECLIPTIC_OF_DATE.value()));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                lahiri | SiderealOption.SOLAR_SYSTEM_PLANE.value()
+                        | SiderealOption.ECLIPTIC_OF_DATE.value()));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                lahiri | SiderealOption.ECLIPTIC_AT_T0.value()
+                        | SiderealOption.SOLAR_SYSTEM_PLANE.value()));
+
+        // Each on its own stays legal.
+        for (SiderealOption projection : new SiderealOption[] {
+                SiderealOption.ECLIPTIC_AT_T0, SiderealOption.SOLAR_SYSTEM_PLANE,
+                SiderealOption.ECLIPTIC_OF_DATE }) {
+            assertEquals(lahiri | projection.value(),
+                    Validation.siderealMode(lahiri | projection.value()));
+        }
+    }
+
+    @Test
+    void originalPrecessionIsRefusedBecauseItLeaksIntoGlobalState() {
+        // It rewrites swed.astro_models one way; clearing the bit later does not
+        // put the old models back, and swe_set_ephe_path() wipes them without the
+        // bit changing.
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                SiderealMode.LAHIRI.value() | SiderealOption.ORIGINAL_PRECESSION.value()));
+        assertThrows(IllegalArgumentException.class,
+                () -> SwissEphConfig.builder().library(java.nio.file.Path.of("libswe.so"))
+                        .siderealMode(SiderealMode.LAHIRI, SiderealOption.ORIGINAL_PRECESSION));
+    }
+
+    @Test
+    void theSiderealReferenceEpochOnlyBelongsToUserMode() {
+        // Upstream reads t0 and the offset only inside its SE_SIDM_USER branch.
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealReference(
+                SiderealMode.LAHIRI.value(), 2_451_545.0, 24.0));
+        Validation.siderealReference(SiderealMode.LAHIRI.value(), 0.0, 0.0);
+
+        Validation.siderealReference(SiderealMode.USER.value(), 2_451_545.0, 24.0);
+        // A USER epoch is a Julian day and has to be one.
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealReference(
+                SiderealMode.USER.value(), Double.MAX_VALUE, 24.0));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealReference(
+                SiderealMode.USER.value(), Double.NaN, 24.0));
+    }
+
+    @Test
+    void negativeBodyIdentifiersAreRefusedWhereTheyWouldReadOutOfBounds() {
+        // swe_rise_trans() and swe_pheno() both reach "if (ipl < NDIAM)
+        // dd = pla_diam[ipl]", which only bounds the top.
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.bodyWithDiameter(-1, "a search"));
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.bodyWithDiameter(CelestialBody.ECLIPTIC_NUTATION.id(), "a search"));
+        assertEquals(0, Validation.bodyWithDiameter(CelestialBody.SUN.id(), "a search"));
+    }
+
+    @Test
     void theDerivedPressureLimitIsExclusive() {
         // At exactly 288/0.0065 the base is zero and pow() returns zero, which is
         // finite. Only strictly above does the model produce NaN.

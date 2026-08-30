@@ -391,8 +391,7 @@ public final class SwissEph implements AutoCloseable {
      */
     public void setSiderealMode(int mode, double t0, double ayanamsaAtT0) {
         Validation.siderealMode(mode);
-        Validation.finite(t0, "t0");
-        Validation.finite(ayanamsaAtT0, "ayanamsaAtT0");
+        Validation.siderealReference(mode, t0, ayanamsaAtT0);
         call(bindings -> {
             bindings.setSiderealMode(mode, t0, ayanamsaAtT0);
             // Recorded on the native thread, so this read-modify-write is
@@ -793,6 +792,7 @@ public final class SwissEph implements AutoCloseable {
 
     private PlanetaryPhenomena phenomena(boolean universalTime, double julianDay, int bodyId,
                                          int flags) {
+        Validation.bodyWithDiameter(bodyId, "a phenomena calculation");
         Validation.julianDay(julianDay, "julianDay");
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
@@ -1116,6 +1116,44 @@ public final class SwissEph implements AutoCloseable {
                 atmosphere);
     }
 
+    /**
+     * Rejects disc options the native code would accept and then not apply.
+     *
+     * <p>Each case is read straight off {@code swe_rise_trans_true_hor()}:
+     * {@code SE_BIT_FIXED_DISC_SIZE} only rewrites the distance for the Sun and
+     * the Moon; a fixed star takes {@code dd = 0}, which makes the disc radius
+     * zero and {@code SE_BIT_DISC_BOTTOM} a no-op; {@code SE_BIT_DISC_CENTER}
+     * sets {@code dd = 0} for the same reason, so a fixed disc size has nothing
+     * left to act on; and a twilight search ORs in
+     * {@code SE_BIT_DISC_CENTER | SE_BIT_NO_REFRACTION} itself, overriding
+     * whichever disc option was asked for.</p>
+     */
+    private static void validateDiscOptions(int bodyId, String starName, int eventFlags,
+                                            boolean twilight) {
+        boolean fixedDiscSize = (eventFlags & RiseTransitFlag.FIXED_DISC_SIZE.value()) != 0;
+        boolean discBottom = (eventFlags & RiseTransitFlag.DISC_BOTTOM.value()) != 0;
+        boolean discCenter = (eventFlags & RiseTransitFlag.DISC_CENTER.value()) != 0;
+        boolean isStar = starName != null;
+
+        if (fixedDiscSize && (isStar
+                || (bodyId != CelestialBody.SUN.id() && bodyId != CelestialBody.MOON.id()))) {
+            throw new IllegalArgumentException("FIXED_DISC_SIZE is only applied to the Sun and "
+                    + "the Moon; for anything else the native code accepts it and ignores it");
+        }
+        if (discBottom && isStar) {
+            throw new IllegalArgumentException("DISC_BOTTOM has no meaning for a fixed star: "
+                    + "the native code gives it a disc radius of zero");
+        }
+        if (discCenter && fixedDiscSize) {
+            throw new IllegalArgumentException("DISC_CENTER already reduces the disc to a point, "
+                    + "so FIXED_DISC_SIZE has nothing left to act on");
+        }
+        if (twilight && (discBottom || fixedDiscSize)) {
+            throw new IllegalArgumentException("a twilight search forces DISC_CENTER and "
+                    + "NO_REFRACTION, so DISC_BOTTOM and FIXED_DISC_SIZE would be overridden");
+        }
+    }
+
     /** Options a meridian transit never consults. */
     private static final int TRANSIT_IGNORED_MASK =
             RiseTransitFlag.DISC_CENTER.value() | RiseTransitFlag.DISC_BOTTOM.value()
@@ -1137,6 +1175,9 @@ public final class SwissEph implements AutoCloseable {
                                           int ephemerisFlags, int eventFlags,
                                           GeographicPosition observer,
                                           AtmosphericConditions atmosphere) {
+        if (starName == null) {
+            Validation.bodyWithDiameter(bodyId, "a rise, set or transit search");
+        }
         Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Objects.requireNonNull(atmosphere, "atmosphere");
         Validation.julianDay(startJulianDayUt, "startJulianDayUt");
@@ -1188,6 +1229,7 @@ public final class SwissEph implements AutoCloseable {
                         "twilight applies to rise and set, not to a meridian transit");
             }
         }
+        validateDiscOptions(bodyId, starName, eventFlags, twilight != 0);
         if ((eventFlags & RiseTransitFlag.DISC_CENTER.value()) != 0
                 && (eventFlags & RiseTransitFlag.DISC_BOTTOM.value()) != 0) {
             // Upstream tests for the centre first and never reaches the other.

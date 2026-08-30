@@ -16,9 +16,14 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -581,20 +586,13 @@ class NativeLifecycleIntegrationTest {
 
         CountDownLatch inCall = new CountDownLatch(1);
         CountDownLatch letTheCallFinish = new CountDownLatch(1);
+        CountDownLatch reachedAcquire = new CountDownLatch(1);
         ExecutorService workers = Executors.newFixedThreadPool(3);
         try {
-            // Occupy the native thread so the teardown cannot complete until we
-            // say so. Ordering matters here: an earlier version of this test
-            // submitted the reopen before the release, so the reopen could take a
-            // reference on the live context and the teardown never happened at
-            // all, yet every assertion still passed.
+            // Hold the native thread so the teardown cannot finish until we allow it.
             Future<?> slow = workers.submit(() -> closing.call(bindings -> {
                 inCall.countDown();
-                try {
-                    letTheCallFinish.await(30, TimeUnit.SECONDS);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                }
+                await(letTheCallFinish);
                 return null;
             }));
             assertTrue(inCall.await(30, TimeUnit.SECONDS), "the slow call never started");
@@ -604,84 +602,203 @@ class NativeLifecycleIntegrationTest {
 
             // The context is marked closed as soon as the teardown is committed,
             // which is also when the per-path gate goes up.
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            while (closing.isOpen() && System.nanoTime() < deadline) {
-                Thread.onSpinWait();
-            }
-            assertFalse(closing.isOpen(), "the teardown never started");
+            awaitUntilClosed(closing);
             assertFalse(releasing.isDone(), "the teardown must still be waiting on the slow call");
 
-            // Only now ask for the same library. This has to queue behind the gate.
-            Future<String> reopening = workers.submit(() -> {
-                try (SwissEph fresh = SwissEph.open(library)) {
-                    assertEquals(1, fresh.handleCount(),
-                            "the waiter must get a brand-new context, not the closing one");
-                    return fresh.version();
-                }
+            // Only now ask for the same library, and say so before blocking, so a
+            // slow thread start cannot be mistaken for the gate holding it.
+            Future<NativeContext> reopening = workers.submit(() -> {
+                reachedAcquire.countDown();
+                return NativeContext.acquire(library, version -> { });
             });
-            assertFalse(reopening.isDone(), "the acquire must wait for the teardown");
+            assertTrue(reachedAcquire.await(30, TimeUnit.SECONDS), "the waiter never started");
+            assertThrows(TimeoutException.class, () -> reopening.get(500, TimeUnit.MILLISECONDS),
+                    "the acquire must be held by the gate while the teardown runs");
 
             letTheCallFinish.countDown();
             slow.get(30, TimeUnit.SECONDS);
             releasing.get(30, TimeUnit.SECONDS);
 
-            assertFalse(reopening.get(60, TimeUnit.SECONDS).isBlank());
+            NativeContext reopened = reopening.get(60, TimeUnit.SECONDS);
+            try {
+                assertNotSame(closing, reopened,
+                        "the waiter must get a new context, not the one that was closing");
+                assertTrue(reopened.isOpen());
+                assertEquals(1, reopened.referenceCount());
+                // A real native call, not a cached field: proof the new context works.
+                assertEquals(2_451_545.0, reopened.call(bindings ->
+                        bindings.julianDay(2000, 1, 1, 12.0, CalendarType.GREGORIAN.value())),
+                        1.0e-9);
+            } finally {
+                reopened.release();
+            }
         } finally {
             letTheCallFinish.countDown();
+            closing.release();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
         }
     }
 
     @Test
-    @DisplayName("A thread waiting on another library load can be interrupted")
+    @DisplayName("A thread waiting on the same library can be interrupted out of the gate")
     void aWaiterOnTheSamePathCanBeInterrupted() throws Exception {
         Path library = NativeTestSupport.requireLibrary();
         NativeContext closing = NativeContext.acquire(library, version -> { });
 
         CountDownLatch inCall = new CountDownLatch(1);
         CountDownLatch letTheCallFinish = new CountDownLatch(1);
+        CountDownLatch reachedAcquire = new CountDownLatch(1);
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
             workers.submit(() -> closing.call(bindings -> {
                 inCall.countDown();
-                try {
-                    letTheCallFinish.await(30, TimeUnit.SECONDS);
-                } catch (InterruptedException interrupted) {
-                    Thread.currentThread().interrupt();
-                }
+                await(letTheCallFinish);
                 return null;
             }));
             assertTrue(inCall.await(30, TimeUnit.SECONDS));
-            workers.submit(closing::release);
+            Future<?> releasing = workers.submit(closing::release);
+            awaitUntilClosed(closing);
 
-            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-            while (closing.isOpen() && System.nanoTime() < deadline) {
-                Thread.onSpinWait();
-            }
-            assertFalse(closing.isOpen());
-
-            // The teardown itself must not be abandoned, but a caller merely
-            // queued behind it holds nothing native and must be able to give up.
+            // The teardown itself must never be abandoned, but a caller merely
+            // queued behind it holds nothing native and should be able to give up.
+            AtomicReference<Throwable> outcome = new AtomicReference<>();
+            AtomicBoolean interruptFlagRestored = new AtomicBoolean();
             Thread waiter = new Thread(() -> {
+                reachedAcquire.countDown();
                 try {
-                    SwissEph.open(library).close();
-                } catch (SwissEphException expected) {
-                    // What an interrupted waiter should see.
+                    NativeContext unexpected = NativeContext.acquire(library, version -> { });
+                    unexpected.release();
+                    outcome.set(new AssertionError("the acquire returned instead of unwinding"));
+                } catch (Throwable thrown) {
+                    outcome.set(thrown);
+                    interruptFlagRestored.set(Thread.currentThread().isInterrupted());
                 }
             }, "interrupted-waiter");
             waiter.start();
-            // Give it a moment to reach the gate, then pull it out.
-            Thread.sleep(200);
+            assertTrue(reachedAcquire.await(30, TimeUnit.SECONDS));
+            // It is either at the gate or about to reach it; either way the
+            // interrupt has to bring it back.
+            assertThrows(TimeoutException.class, () -> releasing.get(200, TimeUnit.MILLISECONDS));
             waiter.interrupt();
             waiter.join(TimeUnit.SECONDS.toMillis(30));
 
-            assertFalse(waiter.isAlive(),
-                    "a waiter on the gate must come back when interrupted");
+            assertFalse(waiter.isAlive(), "an interrupted waiter must not stay on the gate");
+            Throwable thrown = outcome.get();
+            assertInstanceOf(SwissEphException.class, thrown,
+                    "expected a SwissEphException but got " + thrown);
+            assertInstanceOf(InterruptedException.class, thrown.getCause(),
+                    "the interruption must be the stated cause");
+            assertTrue(interruptFlagRestored.get(),
+                    "the interrupt flag must be restored before unwinding");
         } finally {
             letTheCallFinish.countDown();
+            closing.release();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
+        }
+    }
+
+    /** Waits without letting an interrupt turn into a test failure. */
+    private static void await(CountDownLatch latch) {
+        try {
+            latch.await(30, TimeUnit.SECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** Spins until the teardown has been committed and the per-path gate is up. */
+    private static void awaitUntilClosed(NativeContext context) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (context.isOpen() && System.nanoTime() < deadline) {
+            Thread.onSpinWait();
+        }
+        assertFalse(context.isOpen(), "the teardown never started");
+    }
+
+    @Test
+    @DisplayName("Rise and phenomena refuse the identifier that reads pla_diam[-1]")
+    void negativeBodiesAreRefusedByRiseAndPhenomena() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition observer = GeographicPosition.of(2.3522, 48.8566);
+
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                    CelestialBody.ECLIPTIC_NUTATION, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE));
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000, -1,
+                    CalculationFlag.MOSHIER_EPHEMERIS.value(), RiseTransitFlag.RISE.value(),
+                    observer, AtmosphericConditions.STANDARD));
+            assertThrows(IllegalArgumentException.class,
+                    () -> swe.phenomenaUt(J2000, CelestialBody.ECLIPTIC_NUTATION));
+
+            // The same identifier stays legal where it actually means something.
+            EphemerisPosition obliquity = swe.calculateUt(
+                    J2000, CelestialBody.ECLIPTIC_NUTATION, CalculationFlag.MOSHIER_EPHEMERIS);
+            assertTrue(obliquity.firstCoordinate() > 23.0 && obliquity.firstCoordinate() < 24.0,
+                    "body -1 returns the true obliquity, which was 23.44 degrees at J2000");
+        }
+    }
+
+    @Test
+    @DisplayName("Disc options are refused where the native code would not apply them")
+    void discOptionsAreRefusedWhereTheyAreIgnored() {
+        NativeTestSupport.requireFixedStarCatalogue();
+        try (SwissEph swe = NativeTestSupport.open()) {
+            GeographicPosition observer = GeographicPosition.of(2.3522, 48.8566);
+            int moshier = CalculationFlag.MOSHIER_EPHEMERIS.value();
+
+            // FIXED_DISC_SIZE only rewrites the distance for the Sun and the Moon.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                    CelestialBody.MARS, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.FIXED_DISC_SIZE));
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000, "Sirius",
+                    moshier,
+                    RiseTransitFlag.mask(RiseTransitFlag.RISE, RiseTransitFlag.FIXED_DISC_SIZE),
+                    observer, AtmosphericConditions.STANDARD));
+
+            // A fixed star is given a disc radius of zero, so DISC_BOTTOM is a no-op.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000, "Sirius",
+                    moshier,
+                    RiseTransitFlag.mask(RiseTransitFlag.RISE, RiseTransitFlag.DISC_BOTTOM),
+                    observer, AtmosphericConditions.STANDARD));
+
+            // DISC_CENTER already collapses the disc to a point.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                    CelestialBody.MOON, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.DISC_CENTER,
+                    RiseTransitFlag.FIXED_DISC_SIZE));
+
+            // A twilight search ORs in DISC_CENTER and NO_REFRACTION itself.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                    CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.CIVIL_TWILIGHT,
+                    RiseTransitFlag.DISC_BOTTOM));
+
+            // What remains legal still works.
+            assertTrue(swe.riseTransit(J2000, CelestialBody.SUN, observer,
+                    AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.FIXED_DISC_SIZE).found());
+            assertTrue(swe.riseTransit(J2000, CelestialBody.MARS, observer,
+                    AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE, RiseTransitFlag.DISC_BOTTOM).found());
+        }
+    }
+
+    @Test
+    @DisplayName("A sidereal reference epoch is refused for a mode that would drop it")
+    void siderealReferenceEpochIsRefusedOutsideUserMode() {
+        try (SwissEph swe = NativeTestSupport.open()) {
+            assertThrows(IllegalArgumentException.class,
+                    () -> swe.setSiderealMode(SiderealMode.LAHIRI.value(), 2_451_545.0, 24.0));
+            assertThrows(IllegalArgumentException.class, () -> swe.setSiderealMode(
+                    SiderealMode.LAHIRI.value() | SiderealOption.ORIGINAL_PRECESSION.value(),
+                    0.0, 0.0));
+
+            // A user-defined ayanamsha does take them, and then reports itself.
+            swe.setSiderealMode(SiderealMode.USER.value(), 2_451_545.0, 24.0);
+            assertEquals(24.0, swe.ayanamsaUt(2_451_545.0), 1.0e-6,
+                    "at t0 the user-defined ayanamsha is exactly the value supplied");
         }
     }
 

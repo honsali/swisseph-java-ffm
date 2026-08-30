@@ -84,14 +84,32 @@ final class Validation {
      * request and then computes something else, leaving the snapshot in
      * {@code settings()} describing a configuration that is not in force.</p>
      */
+    /** The three mutually exclusive sidereal projections. */
+    private static final int PROJECTION_MASK =
+            SiderealOption.ECLIPTIC_AT_T0.value() | SiderealOption.SOLAR_SYSTEM_PLANE.value()
+                    | SiderealOption.ECLIPTIC_OF_DATE.value();
+
     private static void siderealOptions(SiderealMode base, int options) {
-        boolean eclipticAtT0 = (options & SiderealOption.ECLIPTIC_AT_T0.value()) != 0;
-        boolean solarSystemPlane = (options & SiderealOption.SOLAR_SYSTEM_PLANE.value()) != 0;
-        if (eclipticAtT0 && solarSystemPlane) {
-            // The projection is chosen by an if/else-if that tests ECL_T0 first.
-            throw new IllegalArgumentException("ECLIPTIC_AT_T0 and SOLAR_SYSTEM_PLANE select "
-                    + "different projections and cannot be combined; upstream would silently "
-                    + "use ECLIPTIC_AT_T0");
+        if ((options & SiderealOption.ORIGINAL_PRECESSION.value()) != 0) {
+            // Upstream calls this a test feature, and it is not an option of the
+            // sidereal mode at all: it overwrites swed.astro_models, which is
+            // process-global, one way. Clearing the bit later does not put the
+            // old models back, and swe_set_ephe_path() wipes them through
+            // swi_close_keep_topo_etc() without the bit changing. Whichever way
+            // it is used, settings() ends up describing a configuration that is
+            // not the one in force.
+            throw new IllegalArgumentException("ORIGINAL_PRECESSION changes the global "
+                    + "precession and nutation models rather than this sidereal mode, and "
+                    + "nothing restores them; this binding cannot report that state honestly, "
+                    + "so it refuses the option");
+        }
+        int projections = options & PROJECTION_MASK;
+        if (Integer.bitCount(projections) > 1) {
+            // The projection is chosen by an if / else-if / else chain that tests
+            // ECL_T0, then SSY_PLANE, and only reads ECL_DATE in the last branch.
+            throw new IllegalArgumentException("ECLIPTIC_AT_T0, SOLAR_SYSTEM_PLANE and "
+                    + "ECLIPTIC_OF_DATE select different projections and are mutually "
+                    + "exclusive; upstream would silently keep the first of them");
         }
         if ((options & SiderealOption.USER_T0_IN_UT.value()) != 0
                 && base != SiderealMode.USER) {
@@ -111,6 +129,30 @@ final class Validation {
                     + "upstream replaces its options with ECLIPTIC_AT_T0, so no other option "
                     + "can be honoured");
         }
+    }
+
+    /**
+     * Rejects a body identifier that would index the native diameter table out
+     * of bounds.
+     *
+     * <p>{@code swe_rise_trans()} and {@code swe_pheno()} both reach
+     * {@code else if (ipl < NDIAM) dd = pla_diam[ipl];}. The guard only bounds
+     * the top, so {@code SE_ECL_NUT}, which is {@code -1}, passes it and reads
+     * before the start of the array. {@code swe_calc()} accepts {@code -1} as a
+     * request for obliquity and nutation, so nothing fails earlier.</p>
+     *
+     * <p>Only these two families are affected. Asking for the obliquity itself
+     * through {@code calculate()} stays legal, because that is what {@code -1}
+     * means there.</p>
+     */
+    static int bodyWithDiameter(int bodyId, String what) {
+        if (bodyId < 0) {
+            throw new IllegalArgumentException(what + " needs a real body, but was given "
+                    + bodyId + ". Negative identifiers such as CelestialBody.ECLIPTIC_NUTATION "
+                    + "index the native diameter table out of bounds; they are only meaningful "
+                    + "to calculate() and calculateUt().");
+        }
+        return bodyId;
     }
 
     /** Rejects an observer the eclipse routines would refuse. */
@@ -202,6 +244,28 @@ final class Validation {
 
     static double degrees(double value, String name) {
         return finite(value, name);
+    }
+
+    /**
+     * Checks the reference epoch and offset against the mode they accompany.
+     *
+     * <p>{@code swe_set_sid_mode()} reads them only inside its
+     * {@code SE_SIDM_USER} branch and takes the table values otherwise, so a
+     * non-zero pair with any other mode is discarded while the snapshot keeps
+     * reporting it.</p>
+     */
+    static void siderealReference(int mode, double t0, double ayanamsaAtT0) {
+        finite(t0, "t0");
+        finite(ayanamsaAtT0, "ayanamsaAtT0");
+        if ((mode & 0xFF) == SiderealMode.USER.value()) {
+            julianDay(t0, "t0");
+            return;
+        }
+        if (t0 != 0.0 || ayanamsaAtT0 != 0.0) {
+            throw new IllegalArgumentException("t0 and ayanamsaAtT0 only apply to "
+                    + "SiderealMode.USER; upstream takes them from its own table for every "
+                    + "other mode and would discard these");
+        }
     }
 
     static int inRange(int value, int minimum, int maximum, String name) {

@@ -22,7 +22,18 @@ public enum SiderealOption {
     ECLIPTIC_OF_DATE(2_048),
     /** {@code SE_SIDBIT_NO_PREC_OFFSET}. */
     NO_PRECESSION_OFFSET(4_096),
-    /** {@code SE_SIDBIT_PREC_ORIG}: use the precession model of the original ayanamsha. */
+    /**
+     * {@code SE_SIDBIT_PREC_ORIG}: use the precession model of the original
+     * ayanamsha.
+     *
+     * <p>Present for completeness and <strong>rejected</strong> by this binding.
+     * Upstream describes it as a test feature, and it does not configure the
+     * sidereal mode: it overwrites the process-global
+     * {@code swed.astro_models} in one direction only. Clearing the bit later
+     * does not restore the previous models, and {@code swe_set_ephe_path()}
+     * resets them without the bit changing, so no snapshot of it can stay
+     * truthful.</p>
+     */
     ORIGINAL_PRECESSION(8_192);
 
     private final int mask;
