@@ -6,7 +6,7 @@
 
     <groupId>org.swisseph</groupId>
     <artifactId>swisseph-java-ffm</artifactId>
-    <version>0.5.0</version>
+    <version>1.0.0</version>
     <packaging>jar</packaging>
 
     <name>Swiss Ephemeris Java FFM</name>
@@ -53,7 +53,7 @@
           to the release date whenever the version is bumped.
           See https://maven.apache.org/guides/mini/guide-reproducible-builds.html
         -->
-        <project.build.outputTimestamp>2026-08-29T00:00:00Z</project.build.outputTimestamp>
+        <project.build.outputTimestamp>2026-08-30T00:00:00Z</project.build.outputTimestamp>
         <junit.version>6.0.3</junit.version>
         <!--
           Granting native access to the module under test. Without it the JDK

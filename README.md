@@ -222,14 +222,27 @@ The constant tables are cross-checked against the loaded library too: every
 `SiderealMode` must name a distinct ayanamsha through `swe_get_ayanamsa_name()`,
 and every `HouseSystem` must be recognised by `swe_house_name()`.
 
+## Versioning
+
+From 1.0.0 the published API follows semantic versioning: a minor release adds,
+a patch release fixes, and anything that breaks compilation or changes what a
+call returns waits for a major one.
+
+Two things sit outside that promise, because they are not this project's to
+make. The supported native versions are whatever
+`SwissEphConfig.DEFAULT_SUPPORTED_VERSIONS` lists, and following a new upstream
+release may change results without changing this API. And
+`org.swisseph.ffm.internal` is not exported: it is an implementation detail and
+moves freely.
+
 ## Publishing
 
 ```text
-org.swisseph:swisseph-java-ffm:0.5.0
+org.swisseph:swisseph-java-ffm:1.0.0
 ```
 
 Published to this repository's GitHub Packages registry. Create a release
-tagged `v0.5.0`, or run the **Publish Maven package** workflow manually. Builds
+tagged `v1.0.0`, or run the **Publish Maven package** workflow manually. Builds
 are reproducible: bump `project.build.outputTimestamp` alongside the version.
 
 Note that consuming from GitHub Packages requires a GitHub token in the
