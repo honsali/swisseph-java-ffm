@@ -77,6 +77,11 @@ final class Validation {
         return mode;
     }
 
+    /** The three mutually exclusive sidereal projections. */
+    private static final int SIDEREAL_PROJECTION_MASK =
+            SiderealOption.ECLIPTIC_AT_T0.value() | SiderealOption.SOLAR_SYSTEM_PLANE.value()
+                    | SiderealOption.ECLIPTIC_OF_DATE.value();
+
     /**
      * Rejects option bits the chosen ayanamsha would neutralise.
      *
@@ -84,11 +89,6 @@ final class Validation {
      * request and then computes something else, leaving the snapshot in
      * {@code settings()} describing a configuration that is not in force.</p>
      */
-    /** The three mutually exclusive sidereal projections. */
-    private static final int PROJECTION_MASK =
-            SiderealOption.ECLIPTIC_AT_T0.value() | SiderealOption.SOLAR_SYSTEM_PLANE.value()
-                    | SiderealOption.ECLIPTIC_OF_DATE.value();
-
     private static void siderealOptions(SiderealMode base, int options) {
         if ((options & SiderealOption.ORIGINAL_PRECESSION.value()) != 0) {
             // Upstream calls this a test feature, and it is not an option of the
@@ -103,7 +103,7 @@ final class Validation {
                     + "nothing restores them; this binding cannot report that state honestly, "
                     + "so it refuses the option");
         }
-        int projections = options & PROJECTION_MASK;
+        int projections = options & SIDEREAL_PROJECTION_MASK;
         if (Integer.bitCount(projections) > 1) {
             // The projection is chosen by an if / else-if / else chain that tests
             // ECL_T0, then SSY_PLANE, and only reads ECL_DATE in the last branch.
@@ -131,21 +131,23 @@ final class Validation {
         }
     }
 
+    /** {@code NDIAM}: the length of the native {@code pla_diam} table, {@code SE_VESTA + 1}. */
+    private static final int DIAMETER_TABLE_LENGTH = CelestialBody.VESTA.id() + 1;
+
     /**
-     * Rejects a body identifier that would index the native diameter table out
-     * of bounds.
+     * Rejects an identifier that would index the native diameter table out of
+     * bounds.
      *
      * <p>{@code swe_rise_trans()} and {@code swe_pheno()} both reach
-     * {@code else if (ipl < NDIAM) dd = pla_diam[ipl];}. The guard only bounds
-     * the top, so {@code SE_ECL_NUT}, which is {@code -1}, passes it and reads
-     * before the start of the array. {@code swe_calc()} accepts {@code -1} as a
-     * request for obliquity and nutation, so nothing fails earlier.</p>
+     * {@code if (ipl &lt; NDIAM) dd = pla_diam[ipl];}, and that guard only bounds
+     * the top. {@code SE_ECL_NUT} is {@code -1}, {@code swe_calc()} accepts it as
+     * a request for obliquity and nutation so nothing fails earlier, and the read
+     * lands before the start of the array.</p>
      *
-     * <p>Only these two families are affected. Asking for the obliquity itself
-     * through {@code calculate()} stays legal, because that is what {@code -1}
-     * means there.</p>
+     * <p>Asking for the obliquity through {@code calculate()} stays legal: that
+     * is what {@code -1} means there.</p>
      */
-    static int bodyWithDiameter(int bodyId, String what) {
+    static int safeBodyIdentifier(int bodyId, String what) {
         if (bodyId < 0) {
             throw new IllegalArgumentException(what + " needs a real body, but was given "
                     + bodyId + ". Negative identifiers such as CelestialBody.ECLIPTIC_NUTATION "
@@ -153,6 +155,45 @@ final class Validation {
                     + "to calculate() and calculateUt().");
         }
         return bodyId;
+    }
+
+    /**
+     * Rejects a target that cannot rise, set, or transit.
+     *
+     * <p>{@code swe_calc()} answers a geocentric request for the Earth by
+     * zeroing all 24 values and reporting success, so the distance is zero and
+     * the rise calculation divides by it. Nothing fails; the times just come
+     * back meaningless.</p>
+     */
+    static int riseTransitTarget(int bodyId) {
+        safeBodyIdentifier(bodyId, "a rise, set or transit search");
+        if (bodyId == CelestialBody.EARTH.id()) {
+            throw new IllegalArgumentException("the Earth cannot rise or set from the Earth; "
+                    + "swe_calc() returns a zero vector for it geocentrically, which the rise "
+                    + "calculation then divides by");
+        }
+        return bodyId;
+    }
+
+    /**
+     * Whether the native code gives this body a disc.
+     *
+     * <p>Follows {@code pla_diam} exactly: the Sun through Pluto and the Earth
+     * have diameters, the four node and apogee slots hold zero, Chiron through
+     * Vesta have diameters, and anything past the end of the table takes the
+     * {@code else dd = 0} branch unless it is a numbered asteroid. A body with
+     * no disc makes {@code DISC_CENTER} and {@code DISC_BOTTOM} no-ops.</p>
+     */
+    static boolean hasNativeDisc(int bodyId) {
+        if (bodyId > CelestialBody.ASTEROID_OFFSET) {
+            return true;
+        }
+        if (bodyId < 0 || bodyId >= DIAMETER_TABLE_LENGTH) {
+            return false;
+        }
+        // The four zero entries: mean node, true node, mean apogee, osculating apogee.
+        return bodyId < CelestialBody.MEAN_NODE.id()
+                || bodyId > CelestialBody.OSCULATING_APOGEE.id();
     }
 
     /** Rejects an observer the eclipse routines would refuse. */

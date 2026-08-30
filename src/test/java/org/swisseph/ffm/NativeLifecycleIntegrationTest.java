@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.swisseph.ffm.internal.NativeContext;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -16,14 +17,15 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
-import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.fail;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -578,16 +580,22 @@ class NativeLifecycleIntegrationTest {
         }
     }
 
+    /** What the waiting thread saw, gathered before it let its context go. */
+    private record GateEvidence(boolean sameInstanceAsClosing, int referenceCount,
+                                double julianDay) {
+    }
+
     @Test
-    @DisplayName("An acquire during a teardown waits for it and then gets a fresh context")
+    @DisplayName("An acquire during a teardown waits on the gate and then gets a fresh context")
     void acquireDuringTeardownWaitsForIt() throws Exception {
         Path library = NativeTestSupport.requireLibrary();
         NativeContext closing = NativeContext.acquire(library, version -> { });
 
         CountDownLatch inCall = new CountDownLatch(1);
         CountDownLatch letTheCallFinish = new CountDownLatch(1);
-        CountDownLatch reachedAcquire = new CountDownLatch(1);
-        ExecutorService workers = Executors.newFixedThreadPool(3);
+        AtomicReference<Object> seen = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        Thread waiter = null;
         try {
             // Hold the native thread so the teardown cannot finish until we allow it.
             Future<?> slow = workers.submit(() -> closing.call(bindings -> {
@@ -597,43 +605,53 @@ class NativeLifecycleIntegrationTest {
             }));
             assertTrue(inCall.await(30, TimeUnit.SECONDS), "the slow call never started");
 
-            // Release from its own thread: it blocks behind the slow call.
             Future<?> releasing = workers.submit(closing::release);
-
-            // The context is marked closed as soon as the teardown is committed,
-            // which is also when the per-path gate goes up.
             awaitUntilClosed(closing);
             assertFalse(releasing.isDone(), "the teardown must still be waiting on the slow call");
 
-            // Only now ask for the same library, and say so before blocking, so a
-            // slow thread start cannot be mistaken for the gate holding it.
-            Future<NativeContext> reopening = workers.submit(() -> {
-                reachedAcquire.countDown();
-                return NativeContext.acquire(library, version -> { });
-            });
-            assertTrue(reachedAcquire.await(30, TimeUnit.SECONDS), "the waiter never started");
-            assertThrows(TimeoutException.class, () -> reopening.get(500, TimeUnit.MILLISECONDS),
-                    "the acquire must be held by the gate while the teardown runs");
+            // The waiter owns whatever it acquires and hands back only evidence.
+            waiter = new Thread(() -> {
+                try {
+                    NativeContext acquired = NativeContext.acquire(library, version -> { });
+                    try {
+                        seen.set(new GateEvidence(acquired == closing, acquired.referenceCount(),
+                                acquired.call(bindings -> bindings.julianDay(
+                                        2000, 1, 1, 12.0, CalendarType.GREGORIAN.value()))));
+                    } finally {
+                        acquired.release();
+                    }
+                } catch (Throwable thrown) {
+                    seen.set(thrown);
+                }
+            }, "gate-waiter");
+            waiter.start();
+
+            // Not "it has not finished yet", which would also be true of a thread
+            // that had not started: park it on the gate and prove it is there.
+            awaitParkedInAcquireGate(waiter);
+            assertNull(seen.get(), "the acquire must not have completed while the gate is up");
 
             letTheCallFinish.countDown();
             slow.get(30, TimeUnit.SECONDS);
             releasing.get(30, TimeUnit.SECONDS);
+            waiter.join(TimeUnit.SECONDS.toMillis(30));
+            assertFalse(waiter.isAlive(), "the waiter never came back");
 
-            NativeContext reopened = reopening.get(60, TimeUnit.SECONDS);
-            try {
-                assertNotSame(closing, reopened,
-                        "the waiter must get a new context, not the one that was closing");
-                assertTrue(reopened.isOpen());
-                assertEquals(1, reopened.referenceCount());
-                // A real native call, not a cached field: proof the new context works.
-                assertEquals(2_451_545.0, reopened.call(bindings ->
-                        bindings.julianDay(2000, 1, 1, 12.0, CalendarType.GREGORIAN.value())),
-                        1.0e-9);
-            } finally {
-                reopened.release();
-            }
+            Object outcome = seen.get();
+            assertInstanceOf(GateEvidence.class, outcome, "the waiter failed: " + outcome);
+            GateEvidence evidence = (GateEvidence) outcome;
+            assertFalse(evidence.sameInstanceAsClosing(),
+                    "the waiter must get a new context, not the one that was closing");
+            assertEquals(1, evidence.referenceCount(),
+                    "a fresh context, not one that overlapped with the closing one");
+            assertEquals(2_451_545.0, evidence.julianDay(), 1.0e-9,
+                    "and it must actually work, which a cached field would not prove");
         } finally {
             letTheCallFinish.countDown();
+            if (waiter != null) {
+                waiter.interrupt();
+                waiter.join(TimeUnit.SECONDS.toMillis(30));
+            }
             closing.release();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
@@ -641,17 +659,19 @@ class NativeLifecycleIntegrationTest {
     }
 
     @Test
-    @DisplayName("A thread waiting on the same library can be interrupted out of the gate")
+    @DisplayName("A thread parked on the gate can be interrupted out of it")
     void aWaiterOnTheSamePathCanBeInterrupted() throws Exception {
         Path library = NativeTestSupport.requireLibrary();
         NativeContext closing = NativeContext.acquire(library, version -> { });
 
         CountDownLatch inCall = new CountDownLatch(1);
         CountDownLatch letTheCallFinish = new CountDownLatch(1);
-        CountDownLatch reachedAcquire = new CountDownLatch(1);
+        AtomicReference<Throwable> outcome = new AtomicReference<>();
+        AtomicBoolean interruptFlagRestored = new AtomicBoolean();
         ExecutorService workers = Executors.newFixedThreadPool(2);
+        Thread waiter = null;
         try {
-            workers.submit(() -> closing.call(bindings -> {
+            Future<?> slow = workers.submit(() -> closing.call(bindings -> {
                 inCall.countDown();
                 await(letTheCallFinish);
                 return null;
@@ -660,12 +680,7 @@ class NativeLifecycleIntegrationTest {
             Future<?> releasing = workers.submit(closing::release);
             awaitUntilClosed(closing);
 
-            // The teardown itself must never be abandoned, but a caller merely
-            // queued behind it holds nothing native and should be able to give up.
-            AtomicReference<Throwable> outcome = new AtomicReference<>();
-            AtomicBoolean interruptFlagRestored = new AtomicBoolean();
-            Thread waiter = new Thread(() -> {
-                reachedAcquire.countDown();
+            waiter = new Thread(() -> {
                 try {
                     NativeContext unexpected = NativeContext.acquire(library, version -> { });
                     unexpected.release();
@@ -676,14 +691,14 @@ class NativeLifecycleIntegrationTest {
                 }
             }, "interrupted-waiter");
             waiter.start();
-            assertTrue(reachedAcquire.await(30, TimeUnit.SECONDS));
-            // It is either at the gate or about to reach it; either way the
-            // interrupt has to bring it back.
-            assertThrows(TimeoutException.class, () -> releasing.get(200, TimeUnit.MILLISECONDS));
+
+            // Interrupt only once it is demonstrably parked, so the test cannot
+            // be satisfied by an interrupt that arrived before the wait began.
+            awaitParkedInAcquireGate(waiter);
             waiter.interrupt();
             waiter.join(TimeUnit.SECONDS.toMillis(30));
-
             assertFalse(waiter.isAlive(), "an interrupted waiter must not stay on the gate");
+
             Throwable thrown = outcome.get();
             assertInstanceOf(SwissEphException.class, thrown,
                     "expected a SwissEphException but got " + thrown);
@@ -691,8 +706,18 @@ class NativeLifecycleIntegrationTest {
                     "the interruption must be the stated cause");
             assertTrue(interruptFlagRestored.get(),
                     "the interrupt flag must be restored before unwinding");
+
+            // The teardown itself was never abandoned.
+            letTheCallFinish.countDown();
+            slow.get(30, TimeUnit.SECONDS);
+            releasing.get(30, TimeUnit.SECONDS);
+            assertFalse(closing.isOpen());
         } finally {
             letTheCallFinish.countDown();
+            if (waiter != null) {
+                waiter.interrupt();
+                waiter.join(TimeUnit.SECONDS.toMillis(30));
+            }
             closing.release();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
@@ -702,7 +727,9 @@ class NativeLifecycleIntegrationTest {
     /** Waits without letting an interrupt turn into a test failure. */
     private static void await(CountDownLatch latch) {
         try {
-            latch.await(30, TimeUnit.SECONDS);
+            if (!latch.await(30, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("timed out waiting for a test latch");
+            }
         } catch (InterruptedException interrupted) {
             Thread.currentThread().interrupt();
         }
@@ -712,9 +739,46 @@ class NativeLifecycleIntegrationTest {
     private static void awaitUntilClosed(NativeContext context) {
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
         while (context.isOpen() && System.nanoTime() < deadline) {
-            Thread.onSpinWait();
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
         }
         assertFalse(context.isOpen(), "the teardown never started");
+    }
+
+    /**
+     * Waits until {@code thread} is actually parked on the per-path gate.
+     *
+     * <p>Signalling before the call and then checking that nothing has completed
+     * proves nothing: the thread may simply not have been scheduled yet. The
+     * only honest evidence is the thread sitting in
+     * {@code NativeContext.acquire} inside {@code CountDownLatch.await}.</p>
+     */
+    private static void awaitParkedInAcquireGate(Thread thread) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < deadline) {
+            if (thread.getState() == Thread.State.WAITING && isParkedInAcquireGate(thread)) {
+                return;
+            }
+            LockSupport.parkNanos(TimeUnit.MILLISECONDS.toNanos(1));
+        }
+        fail("thread " + thread.getName() + " never parked on the acquire gate; state was "
+                + thread.getState() + " and its stack was "
+                + Arrays.toString(thread.getStackTrace()));
+    }
+
+    private static boolean isParkedInAcquireGate(Thread thread) {
+        boolean insideAcquire = false;
+        boolean waitingOnLatch = false;
+        for (StackTraceElement frame : thread.getStackTrace()) {
+            if (frame.getClassName().endsWith("NativeContext")
+                    && "acquire".equals(frame.getMethodName())) {
+                insideAcquire = true;
+            }
+            if (frame.getClassName().startsWith("java.util.concurrent.CountDownLatch")
+                    && "await".equals(frame.getMethodName())) {
+                waitingOnLatch = true;
+            }
+        }
+        return insideAcquire && waitingOnLatch;
     }
 
     @Test
@@ -775,10 +839,41 @@ class NativeLifecycleIntegrationTest {
                     RiseTransitFlag.RISE, RiseTransitFlag.CIVIL_TWILIGHT,
                     RiseTransitFlag.DISC_BOTTOM));
 
-            // What remains legal still works.
+            // A fixed star is also given no disc centre to speak of.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000, "Sirius",
+                    moshier,
+                    RiseTransitFlag.mask(RiseTransitFlag.RISE, RiseTransitFlag.DISC_CENTER),
+                    observer, AtmosphericConditions.STANDARD));
+
+            // pla_diam holds zero for the nodes and apogees, so both disc options
+            // are no-ops there too.
+            for (CelestialBody pointLike : new CelestialBody[] {
+                    CelestialBody.MEAN_NODE, CelestialBody.TRUE_NODE,
+                    CelestialBody.OSCULATING_APOGEE }) {
+                assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                        pointLike, observer, AtmosphericConditions.STANDARD,
+                        RiseTransitFlag.RISE, RiseTransitFlag.DISC_BOTTOM),
+                        pointLike + " has no disc");
+                assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                        pointLike, observer, AtmosphericConditions.STANDARD,
+                        RiseTransitFlag.RISE, RiseTransitFlag.DISC_CENTER),
+                        pointLike + " has no disc");
+            }
+
+            // The Earth is not a target at all: swe_calc() zeroes it geocentrically.
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                    CelestialBody.EARTH, observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.RISE));
+            assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(J2000,
+                    CelestialBody.EARTH.id(), moshier, RiseTransitFlag.RISE.value(),
+                    observer, AtmosphericConditions.STANDARD));
+
+            // What remains legal still works, disc and all.
             assertTrue(swe.riseTransit(J2000, CelestialBody.SUN, observer,
                     AtmosphericConditions.STANDARD,
                     RiseTransitFlag.RISE, RiseTransitFlag.FIXED_DISC_SIZE).found());
+            assertTrue(swe.riseTransit(J2000, CelestialBody.MEAN_NODE, observer,
+                    AtmosphericConditions.STANDARD, RiseTransitFlag.RISE).found());
             assertTrue(swe.riseTransit(J2000, CelestialBody.MARS, observer,
                     AtmosphericConditions.STANDARD,
                     RiseTransitFlag.RISE, RiseTransitFlag.DISC_BOTTOM).found());
@@ -795,10 +890,36 @@ class NativeLifecycleIntegrationTest {
                     SiderealMode.LAHIRI.value() | SiderealOption.ORIGINAL_PRECESSION.value(),
                     0.0, 0.0));
 
-            // A user-defined ayanamsha does take them, and then reports itself.
-            swe.setSiderealMode(SiderealMode.USER.value(), 2_451_545.0, 24.0);
-            assertEquals(24.0, swe.ayanamsaUt(2_451_545.0), 1.0e-6,
-                    "at t0 the user-defined ayanamsha is exactly the value supplied");
+            // A user-defined ayanamsha does take them, and gives them back exactly
+            // at t0 -- but only when the epoch and the time scale line up.
+            //
+            // swi_get_ayanamsa_ex() precesses the vernal point from tjd_et to
+            // J2000 and then to t0; when the two coincide the precessions cancel
+            // and the result is ayan_t0 to the last bit. get_aya_correction()
+            // returns 0 outright for t0 == J2000. What remains is nutation, which
+            // swe_get_ayanamsa_ex() adds unless NO_NUTATION is set.
+            //
+            // USER reads t0 as ephemeris time by default, so it is the ET entry
+            // point that lands on it.
+            swe.setSiderealMode(SiderealMode.USER.value(), J2000, 24.0);
+            assertEquals(24.0, swe.ayanamsa(J2000,
+                            CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.NO_NUTATION),
+                    1.0e-9, "at t0 in ET the ayanamsha is exactly the value supplied");
+
+            // With USER_T0_IN_UT the epoch is universal time, and it is then the
+            // UT entry point that lands on it: both sides add the same delta T.
+            swe.setSiderealMode(
+                    SiderealMode.USER.value() | SiderealOption.USER_T0_IN_UT.value(),
+                    J2000, 24.0);
+            assertEquals(24.0, swe.ayanamsaUt(J2000,
+                            CalculationFlag.MOSHIER_EPHEMERIS, CalculationFlag.NO_NUTATION),
+                    1.0e-9, "at t0 in UT the ayanamsha is exactly the value supplied");
+
+            // Nutation is the whole of the difference at this epoch.
+            double withNutation = swe.ayanamsaUt(J2000, CalculationFlag.MOSHIER_EPHEMERIS);
+            assertNotEquals(24.0, withNutation);
+            assertEquals(24.0, withNutation, 0.01,
+                    "nutation in longitude stays well under a hundredth of a degree");
         }
     }
 

@@ -1,0 +1,14 @@
+# Line endings are part of the sources JAR, and the sources JAR is one of the
+# artifacts this project claims is byte-reproducible. Without a fixed policy the
+# same commit produces a different sources JAR from a CRLF checkout than from an
+# LF one, so everything textual is normalised to LF in the working tree as well
+# as in the repository.
+* text=auto eol=lf
+
+# Anything that must never be touched.
+*.se1     binary
+*.jar     binary
+*.png     binary
+*.dll     binary
+*.so      binary
+*.dylib   binary

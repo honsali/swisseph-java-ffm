@@ -792,7 +792,7 @@ public final class SwissEph implements AutoCloseable {
 
     private PlanetaryPhenomena phenomena(boolean universalTime, double julianDay, int bodyId,
                                          int flags) {
-        Validation.bodyWithDiameter(bodyId, "a phenomena calculation");
+        Validation.safeBodyIdentifier(bodyId, "a phenomena calculation");
         Validation.julianDay(julianDay, "julianDay");
         return call(bindings -> {
             try (Arena arena = Arena.ofConfined()) {
@@ -1134,15 +1134,22 @@ public final class SwissEph implements AutoCloseable {
         boolean discBottom = (eventFlags & RiseTransitFlag.DISC_BOTTOM.value()) != 0;
         boolean discCenter = (eventFlags & RiseTransitFlag.DISC_CENTER.value()) != 0;
         boolean isStar = starName != null;
+        boolean hasDisc = !isStar && Validation.hasNativeDisc(bodyId);
 
         if (fixedDiscSize && (isStar
                 || (bodyId != CelestialBody.SUN.id() && bodyId != CelestialBody.MOON.id()))) {
             throw new IllegalArgumentException("FIXED_DISC_SIZE is only applied to the Sun and "
                     + "the Moon; for anything else the native code accepts it and ignores it");
         }
-        if (discBottom && isStar) {
-            throw new IllegalArgumentException("DISC_BOTTOM has no meaning for a fixed star: "
-                    + "the native code gives it a disc radius of zero");
+        if ((discBottom || discCenter) && !hasDisc) {
+            // pla_diam holds zero for the nodes and apogees, and anything past the
+            // end of the table that is not a numbered asteroid takes the
+            // "else dd = 0" branch, as does every fixed star. With a disc radius
+            // of zero, asking for its bottom or its centre changes nothing.
+            throw new IllegalArgumentException((discBottom ? "DISC_BOTTOM" : "DISC_CENTER")
+                    + " has no meaning for a target the native code gives no disc: "
+                    + (isStar ? "a fixed star" : "body " + bodyId)
+                    + " is computed with a disc radius of zero");
         }
         if (discCenter && fixedDiscSize) {
             throw new IllegalArgumentException("DISC_CENTER already reduces the disc to a point, "
@@ -1176,7 +1183,7 @@ public final class SwissEph implements AutoCloseable {
                                           GeographicPosition observer,
                                           AtmosphericConditions atmosphere) {
         if (starName == null) {
-            Validation.bodyWithDiameter(bodyId, "a rise, set or transit search");
+            Validation.riseTransitTarget(bodyId);
         }
         Validation.eclipseObserver(Objects.requireNonNull(observer, "observer"));
         Objects.requireNonNull(atmosphere, "atmosphere");

@@ -268,10 +268,62 @@ class ValidationTest {
         // swe_rise_trans() and swe_pheno() both reach "if (ipl < NDIAM)
         // dd = pla_diam[ipl]", which only bounds the top.
         assertThrows(IllegalArgumentException.class,
-                () -> Validation.bodyWithDiameter(-1, "a search"));
+                () -> Validation.safeBodyIdentifier(-1, "a search"));
         assertThrows(IllegalArgumentException.class,
-                () -> Validation.bodyWithDiameter(CelestialBody.ECLIPTIC_NUTATION.id(), "a search"));
-        assertEquals(0, Validation.bodyWithDiameter(CelestialBody.SUN.id(), "a search"));
+                () -> Validation.safeBodyIdentifier(
+                        CelestialBody.ECLIPTIC_NUTATION.id(), "a search"));
+        assertEquals(0, Validation.safeBodyIdentifier(CelestialBody.SUN.id(), "a search"));
+    }
+
+    @Test
+    void theEarthCannotRiseFromTheEarth() {
+        // swe_calc() answers a geocentric request for the Earth by zeroing all 24
+        // values and reporting success, so the rise calculation divides the
+        // Earth's diameter by a distance of zero.
+        assertThrows(IllegalArgumentException.class,
+                () -> Validation.riseTransitTarget(CelestialBody.EARTH.id()));
+        assertEquals(CelestialBody.MARS.id(),
+                Validation.riseTransitTarget(CelestialBody.MARS.id()));
+    }
+
+    @Test
+    void theDiscTableDecidesWhichTargetsHaveOne() {
+        // Straight off pla_diam: Sun through Pluto, then four zeros for the nodes
+        // and apogees, then the Earth, then Chiron through Vesta.
+        for (CelestialBody withDisc : new CelestialBody[] {
+                CelestialBody.SUN, CelestialBody.MOON, CelestialBody.PLUTO,
+                CelestialBody.EARTH, CelestialBody.CHIRON, CelestialBody.VESTA }) {
+            assertTrue(Validation.hasNativeDisc(withDisc.id()), withDisc + " has a diameter");
+        }
+        for (CelestialBody pointLike : new CelestialBody[] {
+                CelestialBody.MEAN_NODE, CelestialBody.TRUE_NODE, CelestialBody.MEAN_APOGEE,
+                CelestialBody.OSCULATING_APOGEE, CelestialBody.INTERPOLATED_APOGEE,
+                CelestialBody.INTERPOLATED_PERIGEE }) {
+            assertFalse(Validation.hasNativeDisc(pointLike.id()), pointLike + " has no diameter");
+        }
+        // Past the table and below the asteroid offset: the "else dd = 0" branch.
+        assertFalse(Validation.hasNativeDisc(CelestialBody.planetaryMoon(501)));
+        assertFalse(Validation.hasNativeDisc(40));
+        // Numbered asteroids get swed.ast_diam.
+        assertTrue(Validation.hasNativeDisc(CelestialBody.asteroid(433)));
+    }
+
+    @Test
+    void aRejectedBuilderCallLeavesTheBuilderUntouched() {
+        SwissEphConfig.Builder builder = SwissEphConfig.builder()
+                .library(java.nio.file.Path.of("libswe.so"))
+                .siderealMode(SiderealMode.USER.value(), 2_451_545.0, 24.0);
+
+        // t0 and the offset only apply to USER, so this must be refused. The
+        // builder previously assigned the mode before running that check, and
+        // build() then produced LAHIRI carrying the USER references.
+        assertThrows(IllegalArgumentException.class,
+                () -> builder.siderealMode(SiderealMode.LAHIRI.value(), 2_451_545.0, 24.0));
+
+        SwissEphConfig config = builder.build();
+        assertEquals(SiderealMode.USER.value(), config.siderealMode().orElseThrow());
+        assertEquals(2_451_545.0, config.siderealT0());
+        assertEquals(24.0, config.siderealAyanamsaAtT0());
     }
 
     @Test

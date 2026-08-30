@@ -199,8 +199,10 @@ public final class SwissEphConfig {
                         + "t0 and ayanamsaAtT0; use siderealMode(int, double, double) to supply "
                         + "them");
             }
-            this.siderealMode = Validation.siderealMode(
-                    mode.value() | SiderealOption.mask(options));
+            int validated = Validation.siderealMode(mode.value() | SiderealOption.mask(options));
+            // Assign only once everything has been accepted: a builder that kept
+            // the mode from a rejected call would carry it into build().
+            this.siderealMode = validated;
             this.siderealT0 = 0.0;
             this.siderealAyanamsaAtT0 = 0.0;
             return this;
@@ -211,10 +213,12 @@ public final class SwissEphConfig {
             // The same check the setter runs: open(config) pushes these values
             // into the library itself, so a rule enforced only there would be
             // bypassed by the configuration path.
-            this.siderealMode = Validation.siderealMode(mode);
+            int validated = Validation.siderealMode(mode);
             Validation.siderealReference(mode, t0, ayanamsaAtT0);
-            this.siderealT0 = Validation.finite(t0, "t0");
-            this.siderealAyanamsaAtT0 = Validation.finite(ayanamsaAtT0, "ayanamsaAtT0");
+            // All three fields move together, or none of them do.
+            this.siderealMode = validated;
+            this.siderealT0 = t0;
+            this.siderealAyanamsaAtT0 = ayanamsaAtT0;
             return this;
         }
 
@@ -226,6 +230,11 @@ public final class SwissEphConfig {
                                 NativeLibraryLocator.describeFailure(attempts)));
                 libraryPath = resolution.path();
                 librarySource = resolution.source();
+            }
+            if (siderealMode != null) {
+                // The invariant again at the end, in case a future setter forgets.
+                Validation.siderealMode(siderealMode);
+                Validation.siderealReference(siderealMode, siderealT0, siderealAyanamsaAtT0);
             }
             return new SwissEphConfig(this);
         }
