@@ -739,6 +739,27 @@ class ReferenceValueIntegrationTest {
             assertTrue(transit.found());
             assertTrue(transit.julianDayUt() > siriusRise.julianDayUt(),
                     "a body transits after it rises");
+
+            // The decisive check: at upper transit from longitude 0, the sidereal
+            // time equals the object's right ascension. Comparing the two proves
+            // the star name reached the search, rather than some default body
+            // that would satisfy "rises, then transits" just as well.
+            FixedStarPosition sirius = swe.fixedStar2Ut(transit.julianDayUt(), "Sirius",
+                    ephemerisFlag(), CalculationFlag.EQUATORIAL);
+            double rightAscension = sirius.position().firstCoordinate();
+            assertEquals(0.0,
+                    angularDistance(swe.siderealTime(transit.julianDayUt()) * 15.0,
+                            rightAscension),
+                    0.5,
+                    "the transit is not Sirius: sidereal time and right ascension disagree");
+
+            // And the Sun, on the same day from the same place, transits hours away.
+            RiseTransitResult sunTransit = swe.riseTransit(startOfDay, CelestialBody.SUN,
+                    observer, AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.UPPER_MERIDIAN_TRANSIT);
+            assertTrue(sunTransit.found());
+            assertTrue(Math.abs(sunTransit.julianDayUt() - transit.julianDayUt()) > minutes(30.0),
+                    "Sirius and the Sun must not transit at the same moment");
         }
     }
 

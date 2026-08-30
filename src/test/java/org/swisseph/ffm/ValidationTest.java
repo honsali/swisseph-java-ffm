@@ -165,6 +165,54 @@ class ValidationTest {
     }
 
     @Test
+    void siderealOptionsThatTheModeWouldNeutraliseAreRejected() {
+        // The projection is picked by an if/else-if that looks at ECL_T0 first.
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                SiderealMode.LAHIRI.value() | SiderealOption.ECLIPTIC_AT_T0.value()
+                        | SiderealOption.SOLAR_SYSTEM_PLANE.value()));
+
+        // USER_T0_IN_UT is only read inside the SE_SIDM_USER branch.
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                SiderealMode.LAHIRI.value() | SiderealOption.USER_T0_IN_UT.value()));
+        assertEquals(SiderealMode.USER.value() | SiderealOption.USER_T0_IN_UT.value(),
+                Validation.siderealMode(
+                        SiderealMode.USER.value() | SiderealOption.USER_T0_IN_UT.value()));
+
+        // These are computed directly and upstream drops the projection bits.
+        assertTrue(SiderealMode.TRUE_CITRA.ignoresOptions());
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                SiderealMode.TRUE_CITRA.value() | SiderealOption.ECLIPTIC_OF_DATE.value()));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                SiderealMode.GALEQU_TRUE.value() | SiderealOption.ECLIPTIC_AT_T0.value()));
+        assertEquals(SiderealMode.TRUE_CITRA.value(),
+                Validation.siderealMode(SiderealMode.TRUE_CITRA.value()));
+
+        // These four have their options replaced by ECLIPTIC_AT_T0, so asking for
+        // that one is honest and asking for anything else is not.
+        assertTrue(SiderealMode.J2000.forcesEclipticAtT0());
+        assertEquals(SiderealMode.J2000.value() | SiderealOption.ECLIPTIC_AT_T0.value(),
+                Validation.siderealMode(
+                        SiderealMode.J2000.value() | SiderealOption.ECLIPTIC_AT_T0.value()));
+        assertThrows(IllegalArgumentException.class, () -> Validation.siderealMode(
+                SiderealMode.B1950.value() | SiderealOption.SOLAR_SYSTEM_PLANE.value()));
+    }
+
+    @Test
+    void theBuilderRunsTheFullSiderealCheckNotJustTheSignCheck() {
+        SwissEphConfig.Builder builder =
+                SwissEphConfig.builder().library(java.nio.file.Path.of("libswe.so"));
+
+        // open(config) pushes the raw value into the library itself, so the
+        // builder has to apply the same matrix the setter does.
+        assertThrows(IllegalArgumentException.class, () -> builder.siderealMode(47, 0.0, 0.0));
+        assertThrows(IllegalArgumentException.class, () -> builder.siderealMode(254, 0.0, 0.0));
+        assertThrows(IllegalArgumentException.class, () -> builder.siderealMode(
+                SiderealMode.LAHIRI.value() | (1 << 20), 0.0, 0.0));
+        assertThrows(IllegalArgumentException.class, () -> builder.siderealMode(
+                SiderealMode.TRUE_CITRA, SiderealOption.ECLIPTIC_OF_DATE));
+    }
+
+    @Test
     void theDerivedPressureLimitIsExclusive() {
         // At exactly 288/0.0065 the base is zero and pow() returns zero, which is
         // finite. Only strictly above does the model produce NaN.

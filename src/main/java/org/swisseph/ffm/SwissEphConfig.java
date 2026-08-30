@@ -199,7 +199,8 @@ public final class SwissEphConfig {
                         + "t0 and ayanamsaAtT0; use siderealMode(int, double, double) to supply "
                         + "them");
             }
-            this.siderealMode = mode.value() | SiderealOption.mask(options);
+            this.siderealMode = Validation.siderealMode(
+                    mode.value() | SiderealOption.mask(options));
             this.siderealT0 = 0.0;
             this.siderealAyanamsaAtT0 = 0.0;
             return this;
@@ -207,13 +208,10 @@ public final class SwissEphConfig {
 
         /** Applies a user-defined ayanamsha through {@code swe_set_sid_mode()}. */
         public Builder siderealMode(int mode, double t0, double ayanamsaAtT0) {
-            if (mode < 0) {
-                // Upstream folds a negative mode back to Fagan/Bradley, so settings()
-                // would keep reporting a mode that is not the one in force.
-                throw new IllegalArgumentException(
-                        "sidereal mode must not be negative, but was " + mode);
-            }
-            this.siderealMode = mode;
+            // The same check the setter runs: open(config) pushes these values
+            // into the library itself, so a rule enforced only there would be
+            // bypassed by the configuration path.
+            this.siderealMode = Validation.siderealMode(mode);
             this.siderealT0 = Validation.finite(t0, "t0");
             this.siderealAyanamsaAtT0 = Validation.finite(ayanamsaAtT0, "ayanamsaAtT0");
             return this;

@@ -35,8 +35,9 @@ public record EclipseFlags(int value) {
     /**
      * The visibility bits reported.
      *
-     * <p>Only meaningful for the local eclipse functions: the global searches
-     * leave these bits clear.</p>
+     * <p>Only meaningful for the results of the local eclipse <em>searches</em>.
+     * The global searches leave these bits clear, and
+     * {@code swe_sol_eclipse_how()} reports eclipse type only.</p>
      */
     public Set<EclipseVisibility> visibility() {
         EnumSet<EclipseVisibility> result = EnumSet.noneOf(EclipseVisibility.class);

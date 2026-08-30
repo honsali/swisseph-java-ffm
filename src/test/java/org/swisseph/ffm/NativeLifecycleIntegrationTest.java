@@ -411,7 +411,7 @@ class NativeLifecycleIntegrationTest {
         }
     }
 
-    @Test
+    @Test
     @DisplayName("A failed local call still leaves Java and the library agreeing")
     void aFailedLocalCallLeavesTheObserverConsistent() {
         try (SwissEph swe = NativeTestSupport.open()) {
@@ -538,6 +538,21 @@ class NativeLifecycleIntegrationTest {
                     J2000, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
                     RiseTransitFlag.RISE, RiseTransitFlag.DISC_CENTER,
                     RiseTransitFlag.DISC_BOTTOM));
+
+            // calc_mer_trans() reads rsmi only to tell an upper crossing from a
+            // lower one, so everything about the disc and the atmosphere is
+            // accepted and then dropped.
+            for (RiseTransitFlag ignored : new RiseTransitFlag[] {
+                    RiseTransitFlag.DISC_CENTER, RiseTransitFlag.DISC_BOTTOM,
+                    RiseTransitFlag.NO_REFRACTION, RiseTransitFlag.FIXED_DISC_SIZE }) {
+                assertThrows(IllegalArgumentException.class, () -> swe.riseTransit(
+                        J2000, CelestialBody.SUN, observer, AtmosphericConditions.STANDARD,
+                        RiseTransitFlag.UPPER_MERIDIAN_TRANSIT, ignored),
+                        ignored + " is ignored by a transit and must be refused");
+            }
+            assertTrue(swe.riseTransit(J2000, CelestialBody.SUN, observer,
+                    AtmosphericConditions.STANDARD,
+                    RiseTransitFlag.UPPER_MERIDIAN_TRANSIT).found());
         }
     }
 
@@ -559,39 +574,112 @@ class NativeLifecycleIntegrationTest {
     }
 
     @Test
-    @DisplayName("An acquire during a teardown waits and then gets a fresh context")
+    @DisplayName("An acquire during a teardown waits for it and then gets a fresh context")
     void acquireDuringTeardownWaitsForIt() throws Exception {
         Path library = NativeTestSupport.requireLibrary();
         NativeContext closing = NativeContext.acquire(library, version -> { });
 
         CountDownLatch inCall = new CountDownLatch(1);
-        ExecutorService workers = Executors.newFixedThreadPool(2);
+        CountDownLatch letTheCallFinish = new CountDownLatch(1);
+        ExecutorService workers = Executors.newFixedThreadPool(3);
         try {
+            // Occupy the native thread so the teardown cannot complete until we
+            // say so. Ordering matters here: an earlier version of this test
+            // submitted the reopen before the release, so the reopen could take a
+            // reference on the live context and the teardown never happened at
+            // all, yet every assertion still passed.
             Future<?> slow = workers.submit(() -> closing.call(bindings -> {
                 inCall.countDown();
                 try {
-                    Thread.sleep(500);
+                    letTheCallFinish.await(30, TimeUnit.SECONDS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                }
+                return null;
+            }));
+            assertTrue(inCall.await(30, TimeUnit.SECONDS), "the slow call never started");
+
+            // Release from its own thread: it blocks behind the slow call.
+            Future<?> releasing = workers.submit(closing::release);
+
+            // The context is marked closed as soon as the teardown is committed,
+            // which is also when the per-path gate goes up.
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (closing.isOpen() && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
+            assertFalse(closing.isOpen(), "the teardown never started");
+            assertFalse(releasing.isDone(), "the teardown must still be waiting on the slow call");
+
+            // Only now ask for the same library. This has to queue behind the gate.
+            Future<String> reopening = workers.submit(() -> {
+                try (SwissEph fresh = SwissEph.open(library)) {
+                    assertEquals(1, fresh.handleCount(),
+                            "the waiter must get a brand-new context, not the closing one");
+                    return fresh.version();
+                }
+            });
+            assertFalse(reopening.isDone(), "the acquire must wait for the teardown");
+
+            letTheCallFinish.countDown();
+            slow.get(30, TimeUnit.SECONDS);
+            releasing.get(30, TimeUnit.SECONDS);
+
+            assertFalse(reopening.get(60, TimeUnit.SECONDS).isBlank());
+        } finally {
+            letTheCallFinish.countDown();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    @DisplayName("A thread waiting on another library load can be interrupted")
+    void aWaiterOnTheSamePathCanBeInterrupted() throws Exception {
+        Path library = NativeTestSupport.requireLibrary();
+        NativeContext closing = NativeContext.acquire(library, version -> { });
+
+        CountDownLatch inCall = new CountDownLatch(1);
+        CountDownLatch letTheCallFinish = new CountDownLatch(1);
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            workers.submit(() -> closing.call(bindings -> {
+                inCall.countDown();
+                try {
+                    letTheCallFinish.await(30, TimeUnit.SECONDS);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                 }
                 return null;
             }));
             assertTrue(inCall.await(30, TimeUnit.SECONDS));
+            workers.submit(closing::release);
 
-            Future<String> reopening = workers.submit(() -> {
-                try (SwissEph fresh = SwissEph.open(library)) {
-                    return fresh.version();
-                }
-            });
-
-            closing.release();
-            slow.get(30, TimeUnit.SECONDS);
-
-            // The waiter must come back with a working context, not with the one
-            // that was being closed.
-            assertFalse(reopening.get(60, TimeUnit.SECONDS).isBlank());
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (closing.isOpen() && System.nanoTime() < deadline) {
+                Thread.onSpinWait();
+            }
             assertFalse(closing.isOpen());
+
+            // The teardown itself must not be abandoned, but a caller merely
+            // queued behind it holds nothing native and must be able to give up.
+            Thread waiter = new Thread(() -> {
+                try {
+                    SwissEph.open(library).close();
+                } catch (SwissEphException expected) {
+                    // What an interrupted waiter should see.
+                }
+            }, "interrupted-waiter");
+            waiter.start();
+            // Give it a moment to reach the gate, then pull it out.
+            Thread.sleep(200);
+            waiter.interrupt();
+            waiter.join(TimeUnit.SECONDS.toMillis(30));
+
+            assertFalse(waiter.isAlive(),
+                    "a waiter on the gate must come back when interrupted");
         } finally {
+            letTheCallFinish.countDown();
             workers.shutdownNow();
             assertTrue(workers.awaitTermination(30, TimeUnit.SECONDS));
         }

@@ -1116,6 +1116,12 @@ public final class SwissEph implements AutoCloseable {
                 atmosphere);
     }
 
+    /** Options a meridian transit never consults. */
+    private static final int TRANSIT_IGNORED_MASK =
+            RiseTransitFlag.DISC_CENTER.value() | RiseTransitFlag.DISC_BOTTOM.value()
+                    | RiseTransitFlag.NO_REFRACTION.value()
+                    | RiseTransitFlag.FIXED_DISC_SIZE.value();
+
     /** The three mutually exclusive twilight options. */
     private static final int TWILIGHT_MASK =
             RiseTransitFlag.CIVIL_TWILIGHT.value() | RiseTransitFlag.NAUTICAL_TWILIGHT.value()
@@ -1152,6 +1158,14 @@ public final class SwissEph implements AutoCloseable {
             throw new IllegalArgumentException("GEOCENTRIC_NO_ECLIPTIC_LATITUDE cannot be used "
                     + "with a meridian transit: the native code would compute topocentrically "
                     + "against whatever observer was last configured, not this one");
+        }
+        if (isTransit && (eventFlags & TRANSIT_IGNORED_MASK) != 0) {
+            // A transit returns straight into calc_mer_trans(), which reads rsmi
+            // only to tell an upper crossing from a lower one. Everything about
+            // the disc and the atmosphere is dropped on the floor.
+            throw new IllegalArgumentException("a meridian transit ignores DISC_CENTER, "
+                    + "DISC_BOTTOM, NO_REFRACTION and FIXED_DISC_SIZE; they describe where on "
+                    + "the horizon a body appears, which a transit does not consider");
         }
         int twilight = eventFlags & TWILIGHT_MASK;
         if (Integer.bitCount(twilight) > 1) {
@@ -1376,8 +1390,10 @@ public final class SwissEph implements AutoCloseable {
     /**
      * Lunar-eclipse circumstances for a moment and an observer position.
      *
-     * <p>A result whose {@code isEclipsed()} is false means no eclipse is under
-     * way. That is an answer, not a failure.</p>
+     * <p>A result whose {@code isVisible()} is false means the eclipse is not
+     * visible from this place, which upstream reports by zeroing the flags while
+     * still filling in the magnitudes. It does not mean there is no eclipse: read
+     * {@link LunarEclipseAttributes#umbralMagnitude()} for that.</p>
      */
     public LunarEclipseCircumstances lunarEclipseHow(double julianDayUt, int ephemerisFlags,
                                                      GeographicPosition observer) {

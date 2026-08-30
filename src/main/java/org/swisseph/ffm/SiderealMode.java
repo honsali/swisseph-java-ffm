@@ -73,6 +73,33 @@ public enum SiderealMode {
         return nativeValue;
     }
 
+    /**
+     * Whether {@code swe_set_sid_mode()} replaces this mode's options with
+     * {@link SiderealOption#ECLIPTIC_AT_T0}.
+     *
+     * <p>These four are defined by a reference frame, so upstream overwrites
+     * whatever options were asked for with the only one that applies.</p>
+     */
+    public boolean forcesEclipticAtT0() {
+        return this == J2000 || this == J1900 || this == B1950 || this == GALALIGN_MARDYKS;
+    }
+
+    /**
+     * Whether {@code swe_set_sid_mode()} discards this mode's options entirely.
+     *
+     * <p>These ayanamshas are pinned to a star or to the galactic frame and are
+     * computed directly, so upstream drops the projection bits instead of
+     * reporting that it cannot honour them.</p>
+     */
+    public boolean ignoresOptions() {
+        return switch (this) {
+            case TRUE_CITRA, TRUE_REVATI, TRUE_PUSHYA, TRUE_SHEORAN, TRUE_MULA,
+                 GALCENT_0SAG, GALCENT_COCHRANE, GALCENT_RGILBRAND, GALCENT_MULA_WILHELM,
+                 GALEQU_IAU1958, GALEQU_TRUE, GALEQU_MULA -> true;
+            default -> false;
+        };
+    }
+
     /** Looks up a mode by its native value. */
     public static Optional<SiderealMode> of(int nativeValue) {
         for (SiderealMode mode : values()) {

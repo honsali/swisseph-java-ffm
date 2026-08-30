@@ -73,7 +73,44 @@ final class Validation {
             throw new IllegalArgumentException("sidereal mode carries unknown option bits 0x"
                     + Integer.toHexString(options & ~knownOptions));
         }
+        siderealOptions(SiderealMode.of(base).orElseThrow(), options);
         return mode;
+    }
+
+    /**
+     * Rejects option bits the chosen ayanamsha would neutralise.
+     *
+     * <p>Every case here is one where {@code swe_set_sid_mode()} accepts the
+     * request and then computes something else, leaving the snapshot in
+     * {@code settings()} describing a configuration that is not in force.</p>
+     */
+    private static void siderealOptions(SiderealMode base, int options) {
+        boolean eclipticAtT0 = (options & SiderealOption.ECLIPTIC_AT_T0.value()) != 0;
+        boolean solarSystemPlane = (options & SiderealOption.SOLAR_SYSTEM_PLANE.value()) != 0;
+        if (eclipticAtT0 && solarSystemPlane) {
+            // The projection is chosen by an if/else-if that tests ECL_T0 first.
+            throw new IllegalArgumentException("ECLIPTIC_AT_T0 and SOLAR_SYSTEM_PLANE select "
+                    + "different projections and cannot be combined; upstream would silently "
+                    + "use ECLIPTIC_AT_T0");
+        }
+        if ((options & SiderealOption.USER_T0_IN_UT.value()) != 0
+                && base != SiderealMode.USER) {
+            // Only read inside the SE_SIDM_USER branch.
+            throw new IllegalArgumentException(
+                    "USER_T0_IN_UT only means anything with SiderealMode.USER, but the mode is "
+                            + base);
+        }
+        if (base.ignoresOptions() && options != 0) {
+            throw new IllegalArgumentException(base + " is computed directly and upstream "
+                    + "discards its option bits; requesting any would describe a configuration "
+                    + "that is not in force");
+        }
+        if (base.forcesEclipticAtT0()
+                && (options & ~SiderealOption.ECLIPTIC_AT_T0.value()) != 0) {
+            throw new IllegalArgumentException(base + " is defined by its reference frame and "
+                    + "upstream replaces its options with ECLIPTIC_AT_T0, so no other option "
+                    + "can be honoured");
+        }
     }
 
     /** Rejects an observer the eclipse routines would refuse. */
@@ -98,7 +135,7 @@ final class Validation {
                 && observer.altitudeMeters() > MAX_DERIVED_PRESSURE_ALTITUDE_METERS) {
             throw new IllegalArgumentException("deriving the pressure from an altitude of "
                     + observer.altitudeMeters() + " m is not possible: the native barometric "
-                    + "model returns NaN at or above " + MAX_DERIVED_PRESSURE_ALTITUDE_METERS
+                    + "model returns NaN above " + MAX_DERIVED_PRESSURE_ALTITUDE_METERS
                     + " m. Give an explicit pressure instead.");
         }
     }
